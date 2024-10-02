@@ -1,0 +1,606 @@
+use std::time::{Duration, SystemTime};
+
+/// Possible error codes returned
+pub enum Error {
+    /// No frame returned
+    NoFrame = -1,
+
+    /// Unknown frame received
+    OtherFramce = -2,
+
+    /// General error
+    Error = -3,
+
+    /// Too many slaves
+    SlaveCountExceeded = -4,
+
+    /// Request timeout
+    Timeout = -5,
+
+    /// Library already initialized
+    AlreadyInitialized = 0,
+
+    /// Library not initialized
+    NotInitialized,
+
+    /// No slaves were found
+    NoSlaves,
+
+    /// Function failed
+    FunctionFailed,
+}
+
+/// Maximum EtherCAT frame length in bytes
+pub const MAX_ECAT_FRAME_LENGTH: usize = 1518;
+
+const DATA_SIZE: usize = 2;
+const DATAGRAM_HEADER_SIZE: usize = 10;
+const FCS_SIZE: usize = 4;
+
+/// Maximum EtherCAT LRW frame length in bytes
+pub const MAX_LRW_DATA_LENGTH: usize = MAX_ECAT_FRAME_LENGTH
+    - ETHERNET_HEADER_SIZE
+    - DATA_SIZE
+    - DATAGRAM_HEADER_SIZE
+    - ETHERCAT_WORK_COUNTER_SIZE
+    - FCS_SIZE;
+
+/// Size of DC datagram used in first LRW frame
+pub const FIRST_DC_DATAGRAM_SIZE: usize = 20;
+
+/// Standard frame buffer size in bytes
+pub const BUFSIZE: usize = MAX_ECAT_FRAME_LENGTH;
+
+/// Datagram type EtherCAT
+pub const ECATTYPE: u16 = 0x1000;
+
+/// Number of frame buffers per channel
+pub const MAX_BUF_COUNT: usize = 16;
+
+/// Timeout value for tx frame to return to rx
+pub const TIMEOUT_RETURN: Duration = Duration::from_micros(2000);
+
+/// Timeout value for safe data transfer, max. triple retry
+pub const TIMEOUT_RET3: Duration = Duration::from_micros(2000 * 3);
+
+/// Timeout value for return "safe" variant (f.e. wireless)
+pub const TIMEOUT_SAFE: Duration = Duration::from_micros(20_000);
+
+/// Timeout value for EEPROM access
+pub const TIMEOUT_EEP: Duration = Duration::from_micros(20_000);
+
+/// Timeout value for tx mailbox cycle
+pub const TIMEOUT_TTXM: Duration = Duration::from_micros(20_000);
+
+/// Timeout value for rx mailbox cycle
+pub const TIMEOUT_TRXM: Duration = Duration::from_micros(700_000);
+
+/// Timeout value for check statechange
+pub const TIMEOUT_STATE: Duration = Duration::from_micros(2_000_000);
+
+/// Size of EEPROM bitmap cache
+pub const MAX_EEP_BITMAP_SIZE: u16 = 128;
+
+/// Size of EEPROM cache buffer
+pub const MAX_EEP_BUF_SIZE: u16 = MAX_EEP_BITMAP_SIZE << 5;
+
+/// Default number of retries if WKC <= 0
+pub const DEFAULT_RETRIES: u8 = 3;
+
+/// Default group size in 2^x
+pub const LOG_GROUP_OFFSET: u8 = 16;
+
+pub type Buffer = [u8; BUFSIZE];
+
+/// Ethernet header defenition
+pub struct EthernetHeader {
+    /// Destination MAC
+    pub da: [u16; 3],
+
+    // Source MAC
+    pub sa: [u16; 3],
+
+    /// Ethernet type
+    pub etype: u16,
+}
+
+/// Ethernet header size
+pub const ETHERNET_HEADER_SIZE: usize = size_of::<EthernetHeader>();
+
+/// EtherCat datagram header defenition
+pub struct EthercatHeader {
+    /// Length of etherCAT datagram
+    pub ethercat_length: u16,
+
+    /// EtherCAT command
+    pub command: u8,
+
+    /// Index used in SOEM for Tx to Rx recombination
+    pub index: u8,
+
+    /// EtherCAT address
+    pub adp: u16,
+
+    /// Address offset
+    pub ado: u16,
+
+    /// Length of data position in datagram
+    pub data_length: u16,
+
+    /// Interrupt, currently unused
+    pub interrupt: u16,
+}
+
+/// EtherCAT header size
+pub const ETHERCAT_HEADER_SIZE: usize = size_of::<EthercatHeader>();
+
+/// Size of `EthercatHeader.ethercat_length`
+pub const ETHERCAT_LENGTH_SIZE: usize = size_of::<u16>();
+
+/// Offset of command in EtherCAT header
+pub const ETHERCAT_COMMAND_OFFET: usize = ETHERCAT_LENGTH_SIZE;
+
+/// Size of workcounter item in EtherCAT datagram
+pub const ETHERCAT_WORK_COUNTER_SIZE: usize = size_of::<u16>();
+
+/// Definition of datagram follows bit in EthercatHeader.data_length
+pub const DATAGRAM_FOLLOWS: u16 = 1 << 15;
+
+pub enum EthercatState {
+    /// No valid state
+    None,
+
+    /// Init state
+    Init,
+
+    /// Pre-operational
+    PreOperational,
+
+    /// Boot state
+    Boot,
+
+    /// Safe-operational
+    SafeOperational,
+
+    /// Operational
+    Operational = 8,
+
+    /// (ACK) error
+    Error = 0x10,
+}
+
+/// Possible buffer states
+pub enum BufferState {
+    /// Empty
+    Empty,
+
+    /// Allocated but not failed
+    Alloc,
+
+    /// Transmitted
+    Tx,
+
+    /// Received but not consumed
+    Rcvd,
+
+    /// Cycle complete
+    Complete,
+}
+
+/// Ethercat data types
+pub enum Datatype {
+    Boolean = 1,
+    Integer8,
+    Integer16,
+    Integer32,
+    Unsigned8,
+    Unsigned16,
+    Unsigned32,
+    Real32,
+    VisibleString,
+    OctetString,
+    UnicodeString,
+    TimeOfDay,
+    TimeDifference,
+    Domain = 0xF,
+    Integer24,
+    Real64,
+    Integer64 = 0x15,
+    Unsigned24,
+    Unsigned64 = 0x1B,
+    Bit1 = 0x30,
+    Bit2,
+    Bit3,
+    Bit4,
+    Bit5,
+    Bit6,
+    Bit7,
+    Bit8,
+}
+
+/// Ethernet command types
+pub enum CommandType {
+    /// No operation
+    Nop,
+
+    /// Auto increment read
+    AutoPointerRead,
+
+    /// Auto increment write
+    AutoPointerWrite,
+
+    /// Auto increment read/write
+    AutoPointerReadWrite,
+
+    /// Configured address read
+    FixedPointerRead,
+
+    /// Configured address write
+    FixedPointerWrite,
+
+    /// Configured address read/write
+    FixedPointerReadWrite,
+
+    /// Broadcast read
+    BroadcastRead,
+
+    /// Broadcast write
+    BroadcastWrite,
+
+    /// Broadcast read/write
+    BroadcastReadWrite,
+
+    /// Logical memory read
+    LogicalRead,
+
+    /// Logical memory write
+    LogicalWrite,
+
+    /// Logical memory read/write
+    LogicalReadWrite,
+
+    /// Auto increment read multiple write
+    AutoReadMultipleWrite,
+
+    /// Configured read multiple write
+    FixedReadMultipleWrite,
+}
+
+pub enum EepromCommandType {
+    /// No operation
+    Nop = 0x0,
+
+    /// Read
+    Read = 0x100,
+
+    /// Write
+    Write = 0x201,
+
+    Reload = 0x300,
+}
+
+/// EEprom state machine read size
+pub const EEPROM_STATE_MACHINE_READ_SIZE: u16 = 0x40;
+
+/// EEprom state machine busy flag
+pub const EEPROM_STATE_MACHINE_BUSY: u16 = 0x8000;
+
+/// EEprom state machine error flag mask
+pub const EEPROM_STATE_MACHINE_ERROR_MASK: u16 = 0x7800;
+
+/// EEPROM state machine error acknowledge
+pub const EEPROM_STATE_MACHINE_ERROR_NACK: u16 = 0x2000;
+
+pub const SII_START: u16 = 0x40;
+
+pub enum SiiCategory {
+    /// SII category strings
+    String = 10,
+
+    /// SII category general
+    General = 30,
+
+    /// SII category Fieldbus Memory Management Unit
+    FMMU = 40,
+
+    /// SII category Sync manager
+    SM = 41,
+
+    /// SII category Process data object
+    PDO = 50,
+}
+
+/// Item offsets in SII general section
+pub enum SiiGeneralItem {
+    /// Manufacturer
+    Manufacturer = 8,
+
+    /// Product id
+    Id = 0xA,
+
+    /// Revision
+    Revision = 0xC,
+
+    /// Boot receive mailbox
+    BootRxMailbox = 0x14,
+
+    /// Boot send mailbox
+    BootTxMailbox = 0x16,
+
+    /// Mailbox size
+    MailboxSize = 0x19,
+
+    /// Send mailbox address
+    TxMailboxAddress = 0x1A,
+
+    /// Receive mailbox address
+    RxMailboxAddress = 0x18,
+
+    MailboxProtocol = 0x1C,
+}
+
+/// Mailbox types
+pub enum MailboxType {
+    /// Error mailbox
+    Error,
+
+    /// ADS over EtherCAT
+    AdsOverEthercat,
+
+    /// Ethernet over EtherCAT
+    EthernetOverEthercat,
+
+    /// CANopen over EtherCAT
+    CanopenOverEthercat,
+
+    /// File over EtherCAT
+    FileOverEthercat,
+
+    /// Servo over EtherCAT
+    ServoOverEthercat,
+
+    /// Vendor over EtherCAT
+    VendorOverEthercat = 0xF,
+}
+
+/// CANopen over EtherCat mailbox types
+pub enum CanopenOverEthercatMailboxTypes {
+    Emergency = 1,
+
+    /// Service Data Object request
+    SdoRequest,
+
+    /// Service Data Object response
+    SdoResponse,
+
+    /// Send process data object
+    TxPdo,
+
+    /// Rceive process data object
+    RxPdo,
+
+    /// Send process data object RR
+    TxPdoRR,
+
+    /// Receive proces data object RR
+    RxPdoRR,
+
+    /// Service data object information
+    SdoInfo,
+}
+
+/// CANopen over EtherCAT Service Data Object commands
+pub enum CanopenOverEthercatSdoCommand {
+    /// Download initiate
+    DownInit = 0x21,
+
+    /// Download expand
+    DownExp = 0x23,
+
+    /// Download initiate calibration
+    DownInitCa = 0x31,
+
+    /// Upload request
+    UpReq = 0x40,
+
+    /// Upload request calibration
+    UpReqCa = 0x50,
+
+    /// Segment upload request
+    SegUpReq = 0x60,
+
+    /// Service Data Object abort
+    SdoAbort = 0x80,
+}
+
+/// CANopen over EtherCAT object description command
+pub enum CanopenOverEthercatObjectDescriptionCommand {
+    ObjectDictionaryListRequest = 1,
+    ObjectDictionaryListResponse,
+    ObjectDictionaryRequest,
+    ObjectDictionaryResponse,
+    OeRequest,
+    OeResponse,
+    ServiceDataObjectInformationError,
+}
+
+pub enum FileOverEthercatOpcodes {
+    Read = 1,
+    Write,
+    Data,
+    Ack,
+    Error,
+    Busy,
+}
+
+pub enum ServoOverEthercatOpcodes {
+    ReadRequest = 1,
+    ReadResponse,
+    WriteRequest,
+    WriteResponse,
+    Notification,
+    Emergency,
+}
+
+pub enum EthercatRegisters {
+    Type,
+    PortDescriptor = 7,
+
+    /// EtherCAT slave control and status unit protocol
+    EscSup = 8,
+
+    /// Standardized device profile for real-time Ethernet
+    StaDr = 0x10,
+
+    Alias = 0x12,
+    DeviceLayerControl = 0x100,
+    DeviceLayerPort = 0x101,
+    DeviceLayerAlias = 0x103,
+    DeviceLayerStatus = 0x110,
+    ApplicationLayerControl = 0x120,
+    ApplicationLayerStatus = 0x130,
+    ApplicationLayerStatusCode = 0x134,
+    ProcessDataInterfaceControl = 0x140,
+    InterruptMask = 0x200,
+    ReceiveError = 0x300,
+    FatalReceiveError = 0x308,
+    EthercatProtocolUpdateErrorCount = 0x30C,
+    ProcessErrorCount = 0x30D,
+    ProcessErrorCode = 0x30E,
+    LinkLayerCount = 0x310,
+    WatchdogCount = 0x442,
+    EepromConfig = 0x500,
+
+    /// EEPROM control and status
+    EepromControlStat = 0x502,
+
+    EepromAddress = 0x504,
+    EepromData = 0x508,
+
+    FieldbusMemoryManagementUnit0 = 0x600,
+    FieldbusMemoryManagementUnit1 = 0x610,
+    FieldbusMemoryManagementUnit2 = 0x620,
+    FieldbusMemoryManagementUnit3 = 0x630,
+
+    SyncManager0 = 0x800,
+    SyncManager1 = 0x808,
+    SyncManager2 = 0x810,
+    SyncManager3 = 0x818,
+
+    SyncManager0Status = 0x805,
+    SyncManager1Status = 0x808 + 5,
+    SyncManager1Act = 0x808 + 6,
+    SyncManager1Control = 0x808 + 7,
+
+    DistributedClockTime0 = 0x900,
+    DistributedClockTime1 = 0x904,
+    DistributedClockTime2 = 0x908,
+    DistributedClockTime3 = 0x90C,
+
+    DistributedClockSystemTime = 0x910,
+    DistributedClockStartOfFrame = 0x918,
+    DistributedClockSystemOffset = 0x920,
+    DistributedClockSystemDelay = 0x928,
+    DistributedClockSystemDifference = 0x92C,
+    DistributedClockSpeedCount = 0x930,
+    DistributedClockTimeFilter = 0x934,
+    DistributedClockControlUnit = 0x980,
+    DistributedClockSynchronizationActive = 0x981,
+    DistributedClockCycle0 = 0x9A0,
+    DistributedClockCycle1 = 0x9A4,
+}
+
+/// Service data object sync manager communication type
+pub const SDO_SCOMMTYPE: u16 = 0x1C00;
+
+/// Service Data Object - Process Data Object assignment
+pub const SDO_PDO_ASSIGNMENT: u16 = 0x1C10;
+
+/// Service Data Object - received Process Data Object assignment
+pub const SDO_RX_PDO_ASSIGN: u16 = 0x1C12;
+
+/// Service Data Object - Send Process Data Object assignment
+pub const SDO_TX_PDO_ASSIGN: u16 = 0x1C13;
+
+/// Ethercat packet type
+pub const PACKET_ECAT: u16 = 0x88A4;
+
+pub enum ErrorType {
+    ServiceDataObjectError,
+    Emergency,
+    PacketError = 3,
+
+    /// Service data object information error
+    SdoInfoError,
+
+    FileOverEthercatError,
+
+    /// File over ethercat buffer too small
+    FileOverEthernetBufferTooSmall,
+
+    PacketNumber,
+    ServerOverEthercatError,
+    MailboxError,
+    FileOverEthernetFileNotFoundError,
+    EthernetOverEthercatInvalidRxData,
+}
+
+pub enum AbortError {
+    Abort(i32),
+    Error {
+        error_code: u16,
+        error_register: u8,
+        b1: u8,
+        w1: u16,
+        w2: u16,
+    },
+}
+
+pub struct ErrorInfo {
+    /// TIme at which the error was generated
+    pub time: SystemTime,
+
+    /// Signal bit, error set but not read
+    pub signal: bool,
+
+    /// Slave number that generated the error
+    pub slave: u16,
+
+    /// GoE Service Data Object index that generated the error
+    pub index: u16,
+
+    /// GoE Service Data Object subindex that generated the error
+    pub sub_index: u16,
+
+    /// Type of error
+    pub error_type: ErrorType,
+
+    pub abort_error: AbortError,
+}
+
+/// Sets the count value in the mailbox header.
+/// A u16 is used to allow the maximum range of values
+pub const fn mbx_hdr_set_cnt(count: u16) -> u8 {
+    (count << 4) as u8
+}
+
+/// Make a word from 2 bytes
+pub const fn make_word(most_significant: u8, least_significant: u8) -> u16 {
+    (most_significant as u16) << 8 | least_significant as u16
+}
+
+pub const fn high_byte(word: u16) -> u8 {
+    (word >> 8) as u8
+}
+
+pub const fn low_byte(word: u16) -> u8 {
+    (word & 0xff) as u8
+}
+
+pub const fn low_word(dword: u32) -> u16 {
+    (dword & 0xFFFF) as u16
+}
+
+pub const fn high_word(dword: u32) -> u16 {
+    (dword >> 16) as u16
+}
