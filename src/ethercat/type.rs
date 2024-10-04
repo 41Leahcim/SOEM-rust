@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime};
 
+use num_traits::PrimInt;
+
 /// Possible error codes returned
 pub enum Error {
     /// No frame returned
@@ -603,4 +605,16 @@ pub const fn low_word(dword: u32) -> u16 {
 
 pub const fn high_word(dword: u32) -> u16 {
     (dword >> 16) as u16
+}
+
+pub fn host_to_ethercat<Int: PrimInt>(value: Int) -> Int {
+    value.to_le()
+}
+
+pub fn ethercat_to_host<Int: PrimInt>(value: Int) -> Int {
+    if cfg!(target_endian = "big") {
+        value.to_be()
+    } else {
+        value
+    }
 }

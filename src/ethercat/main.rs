@@ -3,7 +3,8 @@ use std::{any::Any, time::Duration};
 use heapless::String as HeaplessString;
 use oshw::nicdrv::{Port, RedPort};
 
-use crate::ethercattype::{Error, MAX_BUF_COUNT};
+use super::r#type::{Error, MAX_BUF_COUNT};
+use crate::oshw;
 
 /// Max. entries in EtherCAT error list
 pub const MAX_E_LIST_ENTRIES: usize = 64;
@@ -418,7 +419,7 @@ pub struct PdoDescription {
 /// Context structure referenced by all Ethernet eXtended functions
 pub struct Context<'context> {
     /// Port reference may include red port
-    pub port: &'context mut Port<'context, MAX_BUF_COUNT>,
+    pub port: &'context mut Port<'context>,
 
     pub slavelist: &'context [Slave],
 
@@ -485,9 +486,9 @@ pub struct Context<'context> {
 pub mod ec_ver1 {
     use std::time::Duration;
 
-    use crate::ethercattype::Error;
+    use super::super::r#type::Error;
 
-    use super::{EepromFmmu, EepromPdo, EepromSyncManager, Fmmu, MailboxBuffer};
+    use super::{EepromFmmu, EepromPdo, EepromSyncManager, MailboxBuffer};
 
     pub fn ec_pusherror(ec: &Error) {
         todo!()
@@ -676,7 +677,7 @@ pub fn init(context: &mut Context, ifname: &str) -> i32 {
 
 pub fn init_redundant(
     context: &mut Context,
-    redport: &mut RedPort<MAX_BUF_COUNT>,
+    redport: &mut RedPort,
     ifname: &str,
     if2name: &mut String,
 ) -> i32 {
