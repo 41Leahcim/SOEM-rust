@@ -34,6 +34,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc"
+version = "0.2.159"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "561d97a539a36e26a9a5fad1ea11a3039a67714694aaa379433e580854bc3dc5"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -47,6 +53,7 @@ name = "soem"
 version = "0.1.0"
 dependencies = [
  "heapless",
+ "libc",
  "num-traits",
 ]
 

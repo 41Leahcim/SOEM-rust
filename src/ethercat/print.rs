@@ -1,4 +1,4 @@
-use super::{main::EcxContext, r#type::Error};
+use super::{main::Context, r#type::Error};
 
 pub fn sdo_error_to_string(sdo_error_code: u32) -> String {
     todo!()
@@ -20,7 +20,7 @@ pub fn ecx_error_to_string(ec: Error) -> String {
     todo!()
 }
 
-pub fn elist_to_string(context: &EcxContext) -> String {
+pub fn elist_to_string(context: &Context) -> String {
     todo!()
 }
 

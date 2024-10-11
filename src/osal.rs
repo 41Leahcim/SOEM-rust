@@ -5,8 +5,14 @@ pub struct OsalTimer {
 }
 
 impl OsalTimer {
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            stop_time: SystemTime::now() + timeout,
+        }
+    }
+
     pub fn start(&mut self, timeout: Duration) {
-        self.stop_time = SystemTime::now() + timeout;
+        *self = Self::new(timeout);
     }
 
     pub fn is_expired(&self) -> bool {

@@ -1,6 +1,6 @@
 use std::{any::Any, time::Duration};
 
-use super::main::EcxContext;
+use super::main::Context;
 
 pub const DATASTATE_BIT: u8 = 0x01;
 pub const NAME_BIT: u8 = 0x02;
@@ -137,7 +137,7 @@ pub mod ec_ver1 {
 }
 
 pub fn soe_read(
-    context: &mut EcxContext,
+    context: &mut Context,
     slave: u16,
     drive_no: u8,
     elementflags: u8,
@@ -150,7 +150,7 @@ pub fn soe_read(
 }
 
 pub fn soe_write(
-    context: &mut EcxContext,
+    context: &mut Context,
     slave: u16,
     drive_no: u8,
     elementflags: u8,
@@ -161,6 +161,6 @@ pub fn soe_write(
     todo!()
 }
 
-pub fn read_id_nmap(context: &mut EcxContext, slave: u16, osize: &mut u32, isize: &mut u32) -> i32 {
+pub fn read_id_nmap(context: &mut Context, slave: u16, osize: &mut u32, isize: &mut u32) -> i32 {
     todo!()
 }

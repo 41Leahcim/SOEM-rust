@@ -2,7 +2,7 @@ use std::{any::Any, net::Ipv4Addr, task::Context, time::Duration};
 
 use num_traits::PrimInt;
 
-use super::main::{EcxContext, MailboxBuffer, MailboxHeader, MAX_MAILBOX_SIZE};
+use super::main::{MailboxBuffer, MailboxHeader, MAX_MAILBOX_SIZE};
 
 /// Use maximum size for EOE mailbox data - mailboxheader and 2 * frameinfo
 pub const MAX_EOE_DATA_LENGTH: usize =
@@ -191,7 +191,7 @@ pub struct EthernetOverEthercat {
     pub data: [u8; MAX_EOE_DATA_LENGTH],
 }
 
-pub fn eoe_defaine_hook(context: &mut EcxContext, hook: &mut [Box<dyn Any>]) -> i32 {
+pub fn eoe_defaine_hook(context: &mut Context, hook: &mut [Box<dyn Any>]) -> i32 {
     todo!()
 }
 
@@ -206,7 +206,7 @@ pub fn eoe_set_ip(
 }
 
 pub fn eoe_get_ip(
-    context: &mut EcxContext,
+    context: &mut Context,
     slave: u16,
     port: u8,
     ip_parameter: &mut EoeParameter,

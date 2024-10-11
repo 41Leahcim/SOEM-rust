@@ -1,9 +1,13 @@
-use std::{any::Any, time::Duration};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use heapless::String as HeaplessString;
 use oshw::nicdrv::{Port, RedPort};
 
-use super::r#type::{Error, MAX_BUF_COUNT};
+use super::r#type::{Error, ErrorInfo, MailboxError, MAX_BUF_COUNT};
 use crate::oshw;
 
 /// Max. entries in EtherCAT error list
@@ -43,7 +47,6 @@ pub const MAX_MAPT: usize = 1;
 pub struct EcAdapter {
     pub name: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
     pub desc: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
-    pub next: Option<Box<EcAdapter>>,
 }
 
 /// Fieldbus Memory Management Unit
@@ -94,9 +97,6 @@ pub enum Coedet {
 }
 
 pub const SYNC_MANAGER_ENABLE_MASK: u32 = 0xFFFE_FFFF;
-
-/// EtherCAT eXtended context
-pub struct EcxContext;
 
 /// Sync manager type
 pub enum SyncManagerType {
@@ -419,9 +419,9 @@ pub struct PdoDescription {
 /// Context structure referenced by all Ethernet eXtended functions
 pub struct Context<'context> {
     /// Port reference may include red port
-    pub port: &'context mut Port<'context>,
+    pub port: Arc<Mutex<Port<'context>>>,
 
-    pub slavelist: &'context [Slave],
+    pub slavelist: Arc<Mutex<[Slave]>>,
 
     /// Number of slaves found in configuration
     pub slave_count: Vec<usize>,
@@ -450,7 +450,7 @@ pub struct Context<'context> {
     index_stack: &'context mut IndexStack,
 
     /// Reference to ecaterror state
-    pub escaterror: &'context mut [bool],
+    pub ecaterror: Arc<Mutex<bool>>,
 
     /// Reference to last DC time from slaves
     pub dc_time: i64,
@@ -655,7 +655,7 @@ pub fn clear_mailbox(mailbox: &mut MailboxBuffer) {
     todo!()
 }
 
-pub fn push_error(context: &mut Context, error: &Error) {
+pub fn push_error(context: &mut Context, error: ErrorInfo) {
     todo!()
 }
 
@@ -733,16 +733,16 @@ pub fn mailbox_send(
     slave: u16,
     mailbox: &mut MailboxBuffer,
     timeout: Duration,
-) -> i32 {
+) -> Result<u16, MailboxError> {
     todo!()
 }
 
 pub fn mailbox_receive(
     context: &mut Context,
     slave: u16,
-    mailbox: MailboxBuffer,
+    mailbox: &mut MailboxBuffer,
     timeout: Duration,
-) -> i32 {
+) -> Result<u16, MailboxError> {
     todo!()
 }
 
