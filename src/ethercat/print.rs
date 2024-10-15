@@ -23,8 +23,3 @@ pub fn ecx_error_to_string(ec: Error) -> String {
 pub fn elist_to_string(context: &Context) -> String {
     todo!()
 }
-
-#[cfg(feature = "ec_ver1")]
-pub fn ec_elist_to_string() -> String {
-    todo!()
-}

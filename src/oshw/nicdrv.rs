@@ -159,57 +159,6 @@ pub struct Port<'port> {
     pub redport: Option<RedPort<'port>>,
 }
 
-#[cfg(feature = "ec_ver1")]
-pub mod ec_ver1 {
-    use std::time::Duration;
-
-    use crate::{ethercat::r#type::BufferState, safe_c};
-
-    use super::{close_nic, setup_nic, NicdrvError, Port};
-
-    /// Setup EtherCAT Network Interface Card
-    pub fn ec_setup_nic(
-        port: &mut Port,
-        interface_name: &str,
-        secondary: bool,
-    ) -> Result<i32, NicdrvError> {
-        setup_nic(port, interface_name, secondary)
-    }
-
-    /// Close EtherCAT Network Interface Card
-    pub fn ec_close_nic(port: &mut Port) -> Result<(), safe_c::CloseError> {
-        close_nic(port)
-    }
-
-    pub fn set_buf_stat(port: &mut Port, index: usize, bufstat: BufferState) {
-        super::set_buf_stat(port, index, bufstat)
-    }
-
-    pub fn get_index(port: &mut Port) -> u8 {
-        super::get_index(port)
-    }
-
-    pub fn out_frame(port: &mut Port, index: usize, stacknumber: i32) -> i32 {
-        super::out_frame(port, index, stacknumber)
-    }
-
-    pub fn out_frame_red(port: &mut Port, index: u8) -> Result<i32, NicdrvError> {
-        super::out_frame_red(port, index)
-    }
-
-    pub fn wait_in_frame(
-        port: &mut Port,
-        index: u8,
-        timeout: Duration,
-    ) -> Result<u16, NicdrvError> {
-        super::wait_in_frame(port, index, timeout)
-    }
-
-    pub fn src_confirm(port: &mut Port, index: u8, timeout: Duration) -> Result<u16, NicdrvError> {
-        super::src_confirm(port, index, timeout)
-    }
-}
-
 /// Initializes the EtherCAT socket
 fn initialize_socket(interface_name: &str) -> Result<i32, CError> {
     use crate::{

@@ -104,38 +104,6 @@ pub struct SoeAttribute {
     reserved2: u32,
 }
 
-#[cfg(feature = "ec_ver1")]
-pub mod ec_ver1 {
-    use std::{any::Any, time::Duration};
-
-    pub fn soe_read(
-        slave: u16,
-        drive_no: u8,
-        element_flags: u8,
-        idn: u16,
-        size: &mut usize,
-        pointer: &mut [Box<dyn Any>],
-        timeout: Duration,
-    ) -> i32 {
-        todo!()
-    }
-
-    pub fn soe_write(
-        slave: u16,
-        drive_no: u8,
-        element_flags: u8,
-        idn: u16,
-        pointer: &mut [Box<dyn Any>],
-        timeout: Duration,
-    ) -> i32 {
-        todo!()
-    }
-
-    pub fn read_id_nmap(slave: u16, osize: &mut u32, isize: u32) -> i32 {
-        todo!()
-    }
-}
-
 pub fn soe_read(
     context: &mut Context,
     slave: u16,

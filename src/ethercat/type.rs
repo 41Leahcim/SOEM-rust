@@ -327,9 +327,14 @@ pub enum BufferState {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct InvalidDataType(u8);
+
 /// Ethercat data types
+#[derive(Debug, Clone, Copy)]
 pub enum Datatype {
-    Boolean = 1,
+    Invalid,
+    Boolean,
     Integer8,
     Integer16,
     Integer32,
@@ -356,6 +361,43 @@ pub enum Datatype {
     Bit6,
     Bit7,
     Bit8,
+}
+
+impl TryFrom<u8> for Datatype {
+    type Error = InvalidDataType;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Boolean),
+            2 => Ok(Self::Integer8),
+            3 => Ok(Self::Integer16),
+            4 => Ok(Self::Integer32),
+            5 => Ok(Self::Unsigned8),
+            6 => Ok(Self::Unsigned16),
+            7 => Ok(Self::Unsigned32),
+            8 => Ok(Self::Real32),
+            9 => Ok(Self::VisibleString),
+            0xA => Ok(Self::OctetString),
+            0xB => Ok(Self::UnicodeString),
+            0xC => Ok(Self::TimeOfDay),
+            0xD => Ok(Self::TimeDifference),
+            0xF => Ok(Self::Domain),
+            0x10 => Ok(Self::Integer24),
+            0x11 => Ok(Self::Real64),
+            0x15 => Ok(Self::Integer64),
+            0x16 => Ok(Self::Unsigned24),
+            0x1B => Ok(Self::Unsigned64),
+            0x30 => Ok(Self::Bit1),
+            0x31 => Ok(Self::Bit2),
+            0x32 => Ok(Self::Bit3),
+            0x33 => Ok(Self::Bit4),
+            0x34 => Ok(Self::Bit5),
+            0x35 => Ok(Self::Bit6),
+            0x36 => Ok(Self::Bit7),
+            0x37 => Ok(Self::Bit8),
+            _ => Err(InvalidDataType(value)),
+        }
+    }
 }
 
 /// Ethernet command types
@@ -666,14 +708,21 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
 }
 
 /// CANopen over EtherCAT object description command
+#[derive(Debug, Clone, Copy)]
 pub enum COEObjectDescriptionCommand {
-    ObjectDictionaryListRequest = 1,
-    ObjectDictionaryListResponse,
-    ObjectDictionaryRequest,
-    ObjectDictionaryResponse,
-    OeRequest,
-    OeResponse,
+    ObjectDesciptionListRequest = 1,
+    ObjectDesciptionListResponse,
+    ObjectDesciptionRequest,
+    ObjectDesciptionResponse,
+    ObjectEntryRequest,
+    ObjectEntryResponse,
     ServiceDataObjectInformationError,
+}
+
+impl COEObjectDescriptionCommand {
+    pub fn is_valid(&self) -> bool {
+        (1..=7).contains(&(*self as u8))
+    }
 }
 
 pub enum FileOverEthercatOpcodes {
@@ -822,7 +871,7 @@ impl From<EthercatRegisters> for u16 {
 }
 
 /// Service data object sync manager communication type
-pub const SDO_SCOMMTYPE: u16 = 0x1C00;
+pub const SDO_SMCOMMTYPE: u16 = 0x1C00;
 
 /// Service Data Object - Process Data Object assignment
 pub const SDO_PDO_ASSIGNMENT: u16 = 0x1C10;
@@ -856,6 +905,8 @@ pub enum ErrorType {
     EthernetOverEthercatInvalidRxData,
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(i32)]
 pub enum AbortError {
     Abort(i32),
     Error {
@@ -865,6 +916,7 @@ pub enum AbortError {
         w1: u16,
         w2: u16,
     },
+    TooManyMasterBufferEntries = 0xF000000,
 }
 
 pub struct ErrorInfo {

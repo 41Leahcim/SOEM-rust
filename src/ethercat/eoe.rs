@@ -2,7 +2,7 @@ use std::{any::Any, net::Ipv4Addr, task::Context, time::Duration};
 
 use num_traits::PrimInt;
 
-use super::main::{MailboxBuffer, MailboxHeader, MAX_MAILBOX_SIZE};
+use super::main::{MailboxHeader, MailboxIn, MAX_MAILBOX_SIZE};
 
 /// Use maximum size for EOE mailbox data - mailboxheader and 2 * frameinfo
 pub const MAX_EOE_DATA_LENGTH: usize =
@@ -237,7 +237,7 @@ pub fn eoe_receive(
 }
 
 pub fn eoe_read_fragment(
-    mailbox_in: &mut MailboxBuffer,
+    mailbox_in: &mut MailboxIn,
     rx_fragment_number: &mut u8,
     rx_frame_offset: &mut u16,
     rx_frame_number: &mut u16,

@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 #default = ["ec_ver1"]
-ec_ver1 = []
+#ec_ver1 = []
 
 [dependencies]
 heapless = "0.8"

@@ -1,3 +1,4 @@
+use core::slice;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -14,7 +15,7 @@ use crate::oshw;
 pub const MAX_E_LIST_ENTRIES: usize = 64;
 
 /// Max length of readable name in slavelist and Object Description List
-pub const MAX_NAME_LENGTH: usize = 40;
+pub const MAX_NAME_LENGTH: u16 = 40;
 
 /// Maximum number of slaves in array
 pub const MAX_SLAVES: usize = 200;
@@ -32,7 +33,7 @@ pub const MAX_MAILBOX_SIZE: usize = 1486;
 pub const MAX_EE_PDO: usize = 0x200;
 
 /// Max Sync Manager used
-pub const MAX_SM: usize = 8;
+pub const MAX_SM: u8 = 8;
 
 /// Max Fieldbus Memory Management Units used
 pub const MAX_FMMU: usize = 4;
@@ -98,13 +99,43 @@ pub enum Coedet {
 
 pub const SYNC_MANAGER_ENABLE_MASK: u32 = 0xFFFE_FFFF;
 
+pub struct InvalidSyncManagerType(u8);
+
 /// Sync manager type
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub enum SyncManagerType {
     Unused,
     MailboxWrite,
     MailboxRead,
     Outputs,
     Inputs,
+}
+
+impl From<SyncManagerType> for u8 {
+    fn from(value: SyncManagerType) -> Self {
+        match value {
+            SyncManagerType::Unused => 0,
+            SyncManagerType::MailboxWrite => 1,
+            SyncManagerType::MailboxRead => 2,
+            SyncManagerType::Outputs => 3,
+            SyncManagerType::Inputs => 4,
+        }
+    }
+}
+
+impl TryFrom<u8> for SyncManagerType {
+    type Error = InvalidSyncManagerType;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Unused),
+            1 => Ok(Self::MailboxWrite),
+            2 => Ok(Self::MailboxRead),
+            3 => Ok(Self::Outputs),
+            4 => Ok(Self::Inputs),
+            _ => Err(InvalidSyncManagerType(value)),
+        }
+    }
 }
 
 /// Amount of data per read from EEProm
@@ -159,8 +190,8 @@ pub struct Slave {
     /// Startbit in IOmap buffer
     pub input_startbit: u8,
 
-    pub sync_manager: [SyncManager; MAX_SM],
-    pub sync_manager_type: [SyncManagerType; MAX_SM],
+    pub sync_manager: [SyncManager; MAX_SM as usize],
+    pub sync_manager_type: [SyncManagerType; MAX_SM as usize],
 
     /// Fieldbus Memory Management Units
     pub fmmu: [Fmmu; MAX_FMMU],
@@ -278,7 +309,7 @@ pub struct Slave {
     /// Registered configuration function PO->SO
     pub po2_so_configx: fn(context: &mut Context, slave: u16) -> i32,
 
-    pub readable_name: HeaplessString<{ MAX_NAME_LENGTH + 1 }>,
+    pub readable_name: HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }>,
 }
 
 ///EtherCAT slave group
@@ -362,7 +393,81 @@ pub struct EepromPdo {
 }
 
 /// Mailbox buffer array
-pub type MailboxBuffer = [u8; MAX_MAILBOX_SIZE];
+#[derive(Debug)]
+pub struct MailboxIn([u8; MAX_MAILBOX_SIZE]);
+
+impl MailboxIn {
+    pub fn empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
+        todo!()
+    }
+
+    pub fn clear(&mut self) {
+        todo!()
+    }
+
+    pub fn receive(
+        &mut self,
+        context: &mut Context,
+        slave: u16,
+        timeout: Duration,
+    ) -> Result<u16, MailboxError> {
+        todo!()
+    }
+}
+
+impl AsRef<[u8]> for MailboxIn {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsMut<[u8]> for MailboxIn {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl Default for MailboxIn {
+    fn default() -> Self {
+        Self([0; MAX_MAILBOX_SIZE])
+    }
+}
+
+#[derive(Debug)]
+pub struct MailboxOut([u8; MAX_MAILBOX_SIZE]);
+
+impl MailboxOut {
+    pub fn empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
+        todo!()
+    }
+
+    pub fn send(
+        &mut self,
+        context: &mut Context,
+        slave: u16,
+        timeout: Duration,
+    ) -> Result<u16, MailboxError> {
+        todo!()
+    }
+}
+
+impl AsRef<[u8]> for MailboxOut {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsMut<[u8]> for MailboxOut {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl Default for MailboxOut {
+    fn default() -> Self {
+        Self([0; MAX_MAILBOX_SIZE])
+    }
+}
 
 /// Standard ethercat mailbox header
 pub struct MailboxHeader {
@@ -396,24 +501,74 @@ pub struct ErrorRing {
 }
 
 /// Sync manager communication type structure for communication access
+#[derive(Debug, Clone)]
 pub struct SyncManagerCommunicationType {
     pub number: u8,
     pub null: u8,
-    pub sync_manager_type: [SyncManagerType; MAX_SM],
+    pub sync_manager_type: [SyncManagerType; MAX_SM as usize],
+}
+
+impl From<&mut SyncManagerCommunicationType> for &mut [u8] {
+    fn from(value: &mut SyncManagerCommunicationType) -> Self {
+        unsafe {
+            slice::from_raw_parts_mut(
+                (value as *mut SyncManagerCommunicationType).cast(),
+                size_of::<SyncManagerCommunicationType>(),
+            )
+        }
+    }
 }
 
 /// Service data object assign structure for communication access
+#[derive(Debug, Clone)]
 pub struct PdoAssign {
     pub number: u8,
     pub null: u8,
     pub index: [u16; 256],
 }
 
+impl From<&mut PdoAssign> for &mut [u8] {
+    fn from(value: &mut PdoAssign) -> Self {
+        unsafe {
+            slice::from_raw_parts_mut((value as *mut PdoAssign).cast(), size_of::<PdoAssign>())
+        }
+    }
+}
+
+impl From<&PdoAssign> for &[u8] {
+    fn from(value: &PdoAssign) -> Self {
+        unsafe { slice::from_raw_parts((value as *const PdoAssign).cast(), size_of::<PdoAssign>()) }
+    }
+}
+
 /// Service data object assign structure for communication access
+#[derive(Debug, Clone)]
 pub struct PdoDescription {
     pub number: u8,
     pub null: u8,
     pub pdo: [u32; 256],
+}
+
+impl From<&mut PdoDescription> for &mut [u8] {
+    fn from(value: &mut PdoDescription) -> Self {
+        unsafe {
+            slice::from_raw_parts_mut(
+                (value as *mut PdoDescription).cast(),
+                size_of::<PdoAssign>(),
+            )
+        }
+    }
+}
+
+impl From<&PdoDescription> for &[u8] {
+    fn from(value: &PdoDescription) -> Self {
+        unsafe {
+            slice::from_raw_parts(
+                (value as *const PdoDescription).cast(),
+                size_of::<PdoAssign>(),
+            )
+        }
+    }
 }
 
 /// Context structure referenced by all Ethernet eXtended functions
@@ -456,13 +611,13 @@ pub struct Context<'context> {
     pub dc_time: i64,
 
     /// Internal Sync manager buffer
-    sync_manager_communication_type: Vec<SyncManagerCommunicationType>,
+    pub sync_manager_communication_type: Vec<SyncManagerCommunicationType>,
 
     /// Internal pdo assign list
-    pdo_assign: Vec<PdoAssign>,
+    pub pdo_assign: Vec<PdoAssign>,
 
     /// Internal pdo description list
-    pdo_description: Vec<PdoDescription>,
+    pub pdo_description: Vec<PdoDescription>,
 
     /// Internal eeprom sync manager list
     eep_sync_manager: Vec<EepromSyncManager>,
@@ -482,161 +637,11 @@ pub struct Context<'context> {
     pub userdata: Vec<Box<dyn Any>>,
 }
 
-#[cfg(feature = "ec_ver1")]
-pub mod ec_ver1 {
-    use std::time::Duration;
-
-    use super::super::r#type::Error;
-
-    use super::{EepromFmmu, EepromPdo, EepromSyncManager, MailboxBuffer};
-
-    pub fn ec_pusherror(ec: &Error) {
-        todo!()
-    }
-
-    pub fn poperror(ec: &Error) -> bool {
-        todo!()
-    }
-
-    pub fn is_error() -> bool {
-        todo!()
-    }
-
-    pub fn packeterror() -> bool {
-        todo!()
-    }
-
-    pub fn init(ifname: &str) -> i32 {
-        todo!()
-    }
-
-    pub fn init_redundant(ifname: &str, if2name: &mut String) -> i32 {
-        todo!()
-    }
-
-    pub fn close() {
-        todo!()
-    }
-
-    pub fn sii_get_byte(slave: u16, address: u16) {
-        todo!()
-    }
-
-    pub fn sii_find(slave: u16, cat: u16) {
-        todo!()
-    }
-
-    pub fn sii_string(str: &mut String, slave: u16, sn: u16) {
-        todo!()
-    }
-
-    pub fn sii_fmmu(slave: u16, fmmu: &mut EepromFmmu) -> u16 {
-        todo!()
-    }
-
-    pub fn sii_sm(slave: u16, sm: &mut EepromSyncManager) -> u16 {
-        todo!()
-    }
-
-    pub fn sii_sm_next(slave: u16, sm: &mut EepromSyncManager, n: u16) -> u16 {
-        todo!()
-    }
-
-    pub fn sii_pdo(slave: u16, pdo: &mut EepromPdo, t: u8) -> u32 {
-        todo!()
-    }
-
-    pub fn readstate() -> i32 {
-        todo!()
-    }
-
-    pub fn writestate(slave: u16) -> i32 {
-        todo!()
-    }
-
-    pub fn statecheck(slave: u16, request_state: u16, timeout: Duration) -> u16 {
-        todo!()
-    }
-
-    pub fn mailbox_empty(slave: u16, timeout: Duration) -> i32 {
-        todo!()
-    }
-
-    pub fn mailbox_send(slave: u16, mailbox: &mut MailboxBuffer, timeout: Duration) -> i32 {
-        todo!()
-    }
-
-    pub fn mailbox_receive(slave: u16, mailbox: &mut MailboxBuffer, timeout: Duration) -> i32 {
-        todo!()
-    }
-
-    pub fn esi_dump(slave: u16, esibuf: &mut Vec<u8>) {
-        todo!()
-    }
-
-    pub fn read_eeprom(slave: u16, eeproma: u16, timeout: Duration) {
-        todo!()
-    }
-
-    pub fn write_eeprom(slave: u16, eeproma: u16, data: u16, timeout: Duration) -> i32 {
-        todo!()
-    }
-
-    pub fn eeprom_to_master(slave: u16) -> i32 {
-        todo!()
-    }
-
-    pub fn eeprom_to_pdi(slave: u16) -> i32 {
-        todo!()
-    }
-
-    pub fn read_eeprom_ap(aiad: u16, eeproma: u16, timeout: Duration) -> u64 {
-        todo!()
-    }
-
-    pub fn write_eeprom_ap(aiadr: u16, eeproma: u16, timeout: Duration) -> u64 {
-        todo!()
-    }
-
-    pub fn read_eeprom_fp(config_address: u16, eeproma: u16, timeout: Duration) -> u64 {
-        todo!()
-    }
-
-    pub fn write_eeprom_fp(config_address: u16, eeproma: u16, data: u16, timeout: Duration) -> i32 {
-        todo!()
-    }
-
-    pub fn read_eeprom1(slave: u16, eeproma: u16) {
-        todo!()
-    }
-
-    pub fn read_eeprom2(slave: u16, timeout: Duration) -> u32 {
-        todo!()
-    }
-
-    pub fn send_processdata_group(group: u8) -> i32 {
-        todo!()
-    }
-
-    pub fn send_overlap_processdata_group(group: u8) -> i32 {
-        todo!()
-    }
-
-    pub fn receive_processdata_group(group: u8) {
-        todo!()
-    }
-
-    pub fn send_processdata() -> i32 {
-        todo!()
-    }
-
-    pub fn send_overlap_processdata() -> i32 {
-        todo!()
-    }
-
-    pub fn receive_processdata(timeout: Duration) -> i32 {
-        todo!()
-    }
+#[derive(Debug, Clone, Copy)]
+pub enum PacketError {
+    UnexpectedFrameReturned = 1,
+    DataContainerTooSmallForType = 3,
+    TooManySyncManagers = 10,
 }
 
 pub fn find_adapters() -> Vec<EcAdapter> {
@@ -648,10 +653,6 @@ pub fn free_adapters(adapters: Vec<EcAdapter>) {
 }
 
 pub fn next_mailbox_count(count: u8) -> u8 {
-    todo!()
-}
-
-pub fn clear_mailbox(mailbox: &mut MailboxBuffer) {
     todo!()
 }
 
@@ -667,7 +668,13 @@ pub fn is_error(context: &mut Context) -> bool {
     todo!()
 }
 
-pub fn packet_error(context: &mut Context, slave: u16, index: u16, sub_index: u8, error_code: u16) {
+pub fn packet_error(
+    context: &mut Context,
+    slave: u16,
+    index: u16,
+    sub_index: u8,
+    error_code: PacketError,
+) {
     todo!()
 }
 
@@ -721,28 +728,6 @@ pub fn writestate(context: &mut Context) -> i32 {
 }
 
 pub fn statecheck(context: &mut Context, slave: u16, request_state: u16, timeout: Duration) -> u16 {
-    todo!()
-}
-
-pub fn mailbox_empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
-    todo!()
-}
-
-pub fn mailbox_send(
-    context: &mut Context,
-    slave: u16,
-    mailbox: &mut MailboxBuffer,
-    timeout: Duration,
-) -> Result<u16, MailboxError> {
-    todo!()
-}
-
-pub fn mailbox_receive(
-    context: &mut Context,
-    slave: u16,
-    mailbox: &mut MailboxBuffer,
-    timeout: Duration,
-) -> Result<u16, MailboxError> {
     todo!()
 }
 
