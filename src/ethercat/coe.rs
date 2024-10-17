@@ -27,14 +27,17 @@ use super::r#type::TIMEOUT_RX_MAILBOX;
 use super::r#type::{AbortError, COEObjectDescriptionCommand, ErrorInfo, ErrorType, MailboxError};
 
 /// Invalid Service Data Object size
+#[derive(Debug)]
 pub struct InvalidSDOSize;
 
 /// Invalid Service Data Object Service size
+#[derive(Debug)]
 pub enum SDOServiceTryFromBytesError {
     InvalidSize(usize),
     InvalidOpcode,
 }
 
+#[derive(Debug)]
 pub enum CoEError {
     InvalidSDOSize(InvalidSDOSize),
     SDOServiceTryFromBytes(SDOServiceTryFromBytesError),
@@ -103,7 +106,7 @@ impl From<Utf8Error> for CoEError {
 }
 
 /// Variants for easy data access
-#[repr(C)]
+
 #[allow(dead_code)]
 enum ServiceData {
     Byte([u8; 0x200]),
@@ -174,7 +177,7 @@ impl ServiceData {
 }
 
 /// Service Data Object structure, not to be confused with `ServiceDataObjectService`
-#[repr(C)]
+
 struct ServiceDataObject {
     mailbox_header: MailboxHeader,
     can_open: u16,
@@ -243,7 +246,7 @@ impl ServiceDataObject {
 }
 
 /// Service Data Object service structure
-#[repr(C)]
+
 struct ServiceDataObjectService {
     mailbox_header: MailboxHeader,
     can_open: u16,
@@ -278,7 +281,7 @@ pub const MAX_OBJECT_DESCRIPTION_LIST_SIZE: u16 = 1024;
 pub const MAX_OBJECT_ENTRY_LIST_SIZE: usize = 256;
 
 /// Storage for object description list
-#[repr(C)]
+
 #[derive(Debug)]
 pub struct ObjectDescriptionList {
     /// Slave number
@@ -318,7 +321,7 @@ impl Default for ObjectDescriptionList {
 }
 
 /// Storage for object list entry information
-#[repr(C)]
+
 pub struct ObjectEntryList {
     /// Number of entries in list
     pub entries: u16,
@@ -342,11 +345,11 @@ pub struct ObjectEntryList {
 /// Report Service Data Object error
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: slave number
-/// `index`: index that generated the error
-/// `sub_index`: Subindex that generated the error
-/// `abort_error`: Abort code or error, see EtherCAT documentation for list
+/// - `context`: Context struct
+/// - `slave`: slave number
+/// - `index`: index that generated the error
+/// - `sub_index`: Subindex that generated the error
+/// - `abort_error`: Abort code or error, see EtherCAT documentation for list
 pub fn sdo_error(
     context: &mut Context,
     slave: u16,
@@ -372,11 +375,11 @@ pub fn sdo_error(
 /// Report Service Data Object info error
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `index`: Index that generated the error
-/// `sub_index`: Subindex that generated the error
-/// `abort_error`: Abort code or error, see EtherCAT documentation for list
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `index`: Index that generated the error
+/// - `sub_index`: Subindex that generated the error
+/// - `abort_error`: Abort code or error, see EtherCAT documentation for list
 fn sdo_info_error(
     context: &mut Context,
     slave: u16,
@@ -434,13 +437,13 @@ fn handle_invalid_slave_response(
 /// will combine all segments and copy them to the parameter buffer.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `index`: Index to read
-/// `subindex`: Subindex to read, must be 0 or 1 if CA is used
-/// `ca`: False for single subindex, true for complete access, all subindexes read
-/// `parameter_buffer`: Reference to parameter buffer
-/// `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `index`: Index to read
+/// - `subindex`: Subindex to read, must be 0 or 1 if CA is used
+/// - `ca`: False for single subindex, true for complete access, all subindexes read
+/// - `parameter_buffer`: Reference to parameter buffer
+/// - `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
 ///
 /// # Returns
 /// Bytes read into `parameter_buffer` or error
@@ -465,7 +468,7 @@ pub fn sdo_read(
 
     // Get new mailbox count value, used as session handle
     let count = {
-        let mut slavelist = context.slavelist.lock().unwrap();
+        let slavelist = &mut context.slavelist;
         let count = next_mailbox_count(slavelist[usize::from(slave)].mailbox_count);
         slavelist[usize::from(slave)].mailbox_count = count;
         count
@@ -557,7 +560,7 @@ pub fn sdo_read(
                         sdo.mailbox_header.address = host_to_ethercat(0);
                         sdo.mailbox_header.priority = 0;
                         {
-                            let slave = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+                            let slave = &mut context.slavelist[usize::from(slave)];
                             let count = next_mailbox_count(slave.mailbox_count);
                             slave.mailbox_count = count;
                             // CANopen over Ethercat
@@ -679,12 +682,12 @@ pub fn sdo_read(
 /// parameter data in segments and send them to the slave one by one.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `index`: Index to write
-/// `sub_index`: Subindex to write, must be 0 or 1 if complete access is used.
-/// `comlete_access`: False for single subindex, true for complete access, all subindexes written
-/// `parameter_buffer`: Timeout delay, standard is `TIMEOUT_RX_MAILBOX`
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `index`: Index to write
+/// - `sub_index`: Subindex to write, must be 0 or 1 if complete access is used.
+/// - `comlete_access`: False for single subindex, true for complete access, all subindexes written
+/// - `parameter_buffer`: Timeout delay, standard is `TIMEOUT_RX_MAILBOX`
 ///
 /// # Returns
 /// Unit or error
@@ -707,7 +710,7 @@ pub fn sdo_write(
     let sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
 
     // Data section = mailbox size - 6 mailbox - 2 CANopen over EtherCAT - 8 service data object requests
-    let mut maxdata = context.slavelist.lock().unwrap()[usize::from(slave)].mailbox_length - 0x10;
+    let mut maxdata = context.slavelist[usize::from(slave)].mailbox_length - 0x10;
 
     // For small data use expedited transfer
     if parameter_buffer.len() <= 4 && !complete_access {
@@ -716,7 +719,7 @@ pub fn sdo_write(
         sdo.mailbox_header.priority = 0;
 
         {
-            let slave_object = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+            let slave_object = &mut context.slavelist[usize::from(slave)];
 
             // Get new mailbox counter, used for session handle
             let count = next_mailbox_count(slave_object.mailbox_count);
@@ -766,7 +769,7 @@ pub fn sdo_write(
 
         // Get new mailbox counter, used for session handle
         {
-            let slave_object = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+            let slave_object = &mut context.slavelist[usize::from(slave)];
             let count = next_mailbox_count(slave_object.mailbox_count);
             slave_object.mailbox_count = count;
             sdo.mailbox_header.mailbox_type =
@@ -838,7 +841,7 @@ pub fn sdo_write(
 
                 // Get new mailbox counter value
                 {
-                    let slave_object = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+                    let slave_object = &mut context.slavelist[usize::from(slave)];
                     let count = next_mailbox_count(slave_object.mailbox_count);
                     slave_object.mailbox_count = count;
                     sdo.mailbox_header.mailbox_type = u8::from(MailboxType::CanopenOverEthercat)
@@ -892,10 +895,10 @@ pub fn sdo_write(
 /// A RxPDO download request is issued.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `RxPDOnumber`: Related RxPDO buffer
-/// `pdo_buffer`: Reference to PDO buffer
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `RxPDOnumber`: Related RxPDO buffer
+/// - `pdo_buffer`: Reference to PDO buffer
 ///
 /// # Returns
 /// Unit or an error
@@ -914,7 +917,7 @@ pub fn rx_pdo(
     let sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
 
     // Data section = mailbox size - 6 mailbox - 2 CANopen over EtherCAT
-    let max_data = context.slavelist.lock().unwrap()[usize::from(slave)].mailbox_length - 8;
+    let max_data = context.slavelist[usize::from(slave)].mailbox_length - 8;
     let framedatasize = (pdo_buffer.len() as u16).min(max_data);
     sdo.mailbox_header.length = host_to_ethercat(2 + framedatasize);
     sdo.mailbox_header.address = host_to_ethercat(0);
@@ -922,7 +925,7 @@ pub fn rx_pdo(
 
     // Get new mailbox counter, used for session handle
     {
-        let slave_object = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+        let slave_object = &mut context.slavelist[usize::from(slave)];
         let count = next_mailbox_count(slave_object.mailbox_count);
         slave_object.mailbox_count = count;
         sdo.mailbox_header.mailbox_type =
@@ -946,11 +949,11 @@ pub fn rx_pdo(
 /// A TxPDO download request is issued
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `tx_pdo_number`: Related TxPDO number
-/// `pdo_buffer`: Reference to PDO buffer
-/// `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `tx_pdo_number`: Related TxPDO number
+/// - `pdo_buffer`: Reference to PDO buffer
+/// - `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
 ///
 /// # Returns
 /// Bytes written to pdo or error
@@ -973,7 +976,7 @@ pub fn tx_pdo(
 
     // Get new mailbox counter, used for session handle
     {
-        let slave = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+        let slave = &mut context.slavelist[usize::from(slave)];
         let count = next_mailbox_count(slave.mailbox_count);
         sdo.mailbox_header.mailbox_type =
             u8::from(MailboxType::CanopenOverEthercat) + mailbox_header_set_count(count);
@@ -1049,9 +1052,9 @@ pub fn tx_pdo(
 /// Read PDO assign structure
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `pdo_assign`: PDO assign object
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `pdo_assign`: PDO assign object
 ///
 /// # Returns total bitlength of PDO assign
 fn read_pdo_assign(context: &mut Context, slave: u16, pdo_assign: u16) -> Result<u32, CoEError> {
@@ -1134,10 +1137,10 @@ fn read_pdo_assign(context: &mut Context, slave: u16, pdo_assign: u16) -> Result
 /// Read PDO assign structure in complete access mode.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `thread_number`: Call thread index
-/// `pdo_assign`: PDO assign object
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `thread_number`: Call thread index
+/// - `pdo_assign`: PDO assign object
 ///
 /// # Returns
 /// Total bitlength of PDO assign
@@ -1225,11 +1228,11 @@ fn read_pdo_assign_complete_access(
 /// - 1A00:01 object mapping #1, f.e. 60100710 (SDO 6010 SI 07 bitlength 0x10)
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `output_size`: Size in bits of output mapping (rxPDO) found
-/// `input_size`: Size in bits of input mapping (txPDO) found
-/// `
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `output_size`: Size in bits of output mapping (rxPDO) found
+/// - `input_size`: Size in bits of input mapping (txPDO) found
+///
 /// # Returns
 /// Unit if successful, error otherwise
 pub fn read_pdo_map(
@@ -1293,11 +1296,11 @@ pub fn read_pdo_map(
         }
         // End slave bug prevention code
 
-        context.slavelist.lock().unwrap()[usize::from(slave)].sync_manager_type
-            [usize::from(input_sync_manager)] = SyncManagerType::try_from(sync_manager_type)?;
+        context.slavelist[usize::from(slave)].sync_manager_type[usize::from(input_sync_manager)] =
+            SyncManagerType::try_from(sync_manager_type)?;
 
         if sync_manager_type == 0 {
-            let flags = &mut context.slavelist.lock().unwrap()[usize::from(slave)].sync_manager
+            let flags = &mut context.slavelist[usize::from(slave)].sync_manager
                 [usize::from(input_sync_manager)]
             .sm_flags;
             *flags = host_to_ethercat(ethercat_to_host(*flags) & SYNC_MANAGER_ENABLE_MASK);
@@ -1317,9 +1320,8 @@ pub fn read_pdo_map(
             continue;
         }
 
-        context.slavelist.lock().unwrap()[usize::from(slave)].sync_manager
-            [usize::from(input_sync_manager)]
-        .sm_length = host_to_ethercat(mapping_bit_size.div_ceil(8) as u16);
+        context.slavelist[usize::from(slave)].sync_manager[usize::from(input_sync_manager)]
+            .sm_length = host_to_ethercat(mapping_bit_size.div_ceil(8) as u16);
         *if sync_manager_type == 3 {
             // It's an output mapping
             &mut *output_size
@@ -1344,11 +1346,11 @@ pub fn read_pdo_map(
 /// use `read_pdo_map`.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave number
-/// `thread_number`: Calling thread index
-/// `output_size`: Size in bits of output mapping (rxPDO) found
-/// `input_size`: Size in bits of input mapping (txPDO) found
+/// - `context`: Context struct
+/// - `slave`: Slave number
+/// - `thread_number`: Calling thread index
+/// - `output_size`: Size in bits of output mapping (rxPDO) found
+/// - `input_size`: Size in bits of input mapping (txPDO) found
 ///
 /// # Returns
 /// Unit or error
@@ -1405,12 +1407,12 @@ pub fn read_pdo_map_complete_access(
         }
         // End slave bug prevention code
 
-        context.slavelist.lock().unwrap()[usize::from(slave)].sync_manager_type
-            [usize::from(input_sync_manager)] = SyncManagerType::try_from(sync_manager_type)?;
+        context.slavelist[usize::from(slave)].sync_manager_type[usize::from(input_sync_manager)] =
+            SyncManagerType::try_from(sync_manager_type)?;
 
         // Check if SyncManagr is unused -> clear enable flag
         if sync_manager_type == 0 {
-            let flags = &mut context.slavelist.lock().unwrap()[usize::from(slave)].sync_manager
+            let flags = &mut context.slavelist[usize::from(slave)].sync_manager
                 [usize::from(input_sync_manager)]
             .sm_flags;
             *flags = host_to_ethercat(ethercat_to_host(*flags) & SYNC_MANAGER_ENABLE_MASK);
@@ -1432,9 +1434,8 @@ pub fn read_pdo_map_complete_access(
             continue;
         }
 
-        context.slavelist.lock().unwrap()[usize::from(slave)].sync_manager
-            [usize::from(input_sync_manager)]
-        .sm_length = host_to_ethercat(mapping_size.div_ceil(8) as u16);
+        context.slavelist[usize::from(slave)].sync_manager[usize::from(input_sync_manager)]
+            .sm_length = host_to_ethercat(mapping_size.div_ceil(8) as u16);
 
         *if sync_manager_type == 3 {
             // It's an output mapping
@@ -1455,8 +1456,8 @@ pub fn read_pdo_map_complete_access(
 /// CANopen over EtherCAT read Object Description List
 ///
 /// # Parameters
-/// `context`: context struct
-/// `slave`: slave number
+/// - `context`: context struct
+/// - `slave`: slave number
 ///
 /// # Returns
 /// Unit or error
@@ -1473,7 +1474,7 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
 
     // Get new mailbox counter value
     {
-        let slave = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+        let slave = &mut context.slavelist[usize::from(slave)];
         let count = next_mailbox_count(slave.mailbox_count);
         sdo.mailbox_header.mailbox_type =
             u8::from(MailboxType::CanopenOverEthercat) + mailbox_header_set_count(count);
@@ -1593,9 +1594,9 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
 /// CANopen over EtherCAT read Object Description. Adds textual information to object indexes.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `item`: Item number in Object  Description List
-/// `od_list`: Referencing Object Description list
+/// - `context`: Context struct
+/// - `item`: Item number in Object  Description List
+/// - `od_list`: Referencing Object Description list
 ///
 /// # Returns
 /// Unit or error
@@ -1619,7 +1620,7 @@ pub fn read_od_description(
 
     // Get new mailbox counter value
     {
-        let slave = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+        let slave = &mut context.slavelist[usize::from(slave)];
         let count = next_mailbox_count(slave.mailbox_count);
         slave.mailbox_count = count;
         sdo.mailbox_header.mailbox_type =
@@ -1695,11 +1696,11 @@ pub fn read_od_description(
 /// Used in `read_oe`.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `item`: Item in Object Description List
-/// `sub_index`: Subindex of item in Object Description List
-/// `od_list`: Object Description list for reference
-/// `oe_list`: Resulting object entry structure
+/// - `context`: Context struct
+/// - `item`: Item in Object Description List
+/// - `sub_index`: Subindex of item in Object Description List
+/// - `od_list`: Object Description list for reference
+/// - `oe_list`: Resulting object entry structure
 ///
 /// # Returns
 /// Unit or error
@@ -1725,7 +1726,7 @@ pub fn read_oe_single(
 
     // Get new mailbox counter value
     {
-        let slave = &mut context.slavelist.lock().unwrap()[usize::from(slave)];
+        let slave = &mut context.slavelist[usize::from(slave)];
         let count = next_mailbox_count(slave.mailbox_count);
         sdo.mailbox_header.mailbox_type =
             u8::from(MailboxType::CanopenOverEthercat) + mailbox_header_set_count(count);
@@ -1793,10 +1794,10 @@ pub fn read_oe_single(
 /// CANopen read Service Data Object Service object entry
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `item`: Item in Object Description list
-/// `od_list`: Object description list for reference
-/// `oe_list`: Object entry structure
+/// - `context`: Context struct
+/// - `item`: Item in Object Description list
+/// - `od_list`: Object description list for reference
+/// - `oe_list`: Object entry structure
 ///
 /// # Returns Unit or workcounter
 pub fn read_oe(

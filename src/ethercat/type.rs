@@ -328,6 +328,7 @@ pub enum BufferState {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct InvalidDataType(u8);
 
 /// Ethercat data types
@@ -484,8 +485,8 @@ pub enum EepromCommandType {
     Reload = 0x300,
 }
 
-/// EEprom state machine read size
-pub const EEPROM_STATE_MACHINE_READ_SIZE: u16 = 0x40;
+/// EEprom state machine 8 byte chunk read ability
+pub const EEPROM_STATE_MACHINE_READ64: u16 = 0x40;
 
 /// EEprom state machine busy flag
 pub const EEPROM_STATE_MACHINE_BUSY: u16 = 0x8000;
@@ -516,6 +517,7 @@ pub enum SiiCategory {
 }
 
 /// Item offsets in SII general section
+#[derive(Debug, Clone, Copy)]
 pub enum SiiGeneralItem {
     /// Manufacturer
     Manufacturer = 8,
@@ -544,6 +546,7 @@ pub enum SiiGeneralItem {
     MailboxProtocol = 0x1C,
 }
 
+#[derive(Debug)]
 pub enum MailboxError {
     InvalidMailboxType(u8),
     InvalidCOEMailboxType(u8),
@@ -743,7 +746,7 @@ pub enum ServoOverEthercatOpcodes {
     Emergency,
 }
 
-pub enum EthercatRegisters {
+pub enum EthercatRegister {
     Type,
     PortDescriptor = 7,
 
@@ -811,61 +814,61 @@ pub enum EthercatRegisters {
     DistributedClockCycle1 = 0x9A4,
 }
 
-impl From<EthercatRegisters> for u16 {
-    fn from(value: EthercatRegisters) -> Self {
+impl From<EthercatRegister> for u16 {
+    fn from(value: EthercatRegister) -> Self {
         match value {
-            EthercatRegisters::Type => 0,
-            EthercatRegisters::PortDescriptor => 7,
-            EthercatRegisters::EscSup => 8,
-            EthercatRegisters::StaDr => 0x10,
-            EthercatRegisters::Alias => 0x12,
-            EthercatRegisters::DeviceLayerControl => 0x100,
-            EthercatRegisters::DeviceLayerPort => 0x101,
-            EthercatRegisters::DeviceLayerAlias => 0x103,
-            EthercatRegisters::DeviceLayerStatus => 0x110,
-            EthercatRegisters::ApplicationLayerControl => 0x120,
-            EthercatRegisters::ApplicationLayerStatus => 0x130,
-            EthercatRegisters::ApplicationLayerStatusCode => 0x134,
-            EthercatRegisters::ProcessDataInterfaceControl => 0x140,
-            EthercatRegisters::InterruptMask => 0x200,
-            EthercatRegisters::ReceiveError => 0x300,
-            EthercatRegisters::FatalReceiveError => 0x308,
-            EthercatRegisters::EthercatProtocolUpdateErrorCount => 0x30C,
-            EthercatRegisters::ProcessErrorCount => 0x30D,
-            EthercatRegisters::ProcessErrorCode => 0x30E,
-            EthercatRegisters::LinkLayerCount => 0x310,
-            EthercatRegisters::WatchdogCount => 0x442,
-            EthercatRegisters::EepromConfig => 0x500,
-            EthercatRegisters::EepromControlStat => 0x502,
-            EthercatRegisters::EepromAddress => 0x504,
-            EthercatRegisters::EepromData => 0x508,
-            EthercatRegisters::FieldbusMemoryManagementUnit0 => 0x600,
-            EthercatRegisters::FieldbusMemoryManagementUnit1 => 0x610,
-            EthercatRegisters::FieldbusMemoryManagementUnit2 => 0x620,
-            EthercatRegisters::FieldbusMemoryManagementUnit3 => 0x630,
-            EthercatRegisters::SyncManager0 => 0x800,
-            EthercatRegisters::SyncManager1 => 0x808,
-            EthercatRegisters::SyncManager2 => 0x810,
-            EthercatRegisters::SyncManager3 => 0x818,
-            EthercatRegisters::SyncManager0Status => 0x805,
-            EthercatRegisters::SyncManager1Status => 0x808 + 5,
-            EthercatRegisters::SyncManager1Act => 0x808 + 6,
-            EthercatRegisters::SyncManager1Control => 0x808 + 7,
-            EthercatRegisters::DistributedClockTime0 => 0x900,
-            EthercatRegisters::DistributedClockTime1 => 0x904,
-            EthercatRegisters::DistributedClockTime2 => 0x908,
-            EthercatRegisters::DistributedClockTime3 => 0x90C,
-            EthercatRegisters::DistributedClockSystemTime => 0x910,
-            EthercatRegisters::DistributedClockStartOfFrame => 0x918,
-            EthercatRegisters::DistributedClockSystemOffset => 0x920,
-            EthercatRegisters::DistributedClockSystemDelay => 0x928,
-            EthercatRegisters::DistributedClockSystemDifference => 0x92C,
-            EthercatRegisters::DistributedClockSpeedCount => 0x930,
-            EthercatRegisters::DistributedClockTimeFilter => 0x934,
-            EthercatRegisters::DistributedClockControlUnit => 0x980,
-            EthercatRegisters::DistributedClockSynchronizationActive => 0x981,
-            EthercatRegisters::DistributedClockCycle0 => 0x9A0,
-            EthercatRegisters::DistributedClockCycle1 => 0x9A4,
+            EthercatRegister::Type => 0,
+            EthercatRegister::PortDescriptor => 7,
+            EthercatRegister::EscSup => 8,
+            EthercatRegister::StaDr => 0x10,
+            EthercatRegister::Alias => 0x12,
+            EthercatRegister::DeviceLayerControl => 0x100,
+            EthercatRegister::DeviceLayerPort => 0x101,
+            EthercatRegister::DeviceLayerAlias => 0x103,
+            EthercatRegister::DeviceLayerStatus => 0x110,
+            EthercatRegister::ApplicationLayerControl => 0x120,
+            EthercatRegister::ApplicationLayerStatus => 0x130,
+            EthercatRegister::ApplicationLayerStatusCode => 0x134,
+            EthercatRegister::ProcessDataInterfaceControl => 0x140,
+            EthercatRegister::InterruptMask => 0x200,
+            EthercatRegister::ReceiveError => 0x300,
+            EthercatRegister::FatalReceiveError => 0x308,
+            EthercatRegister::EthercatProtocolUpdateErrorCount => 0x30C,
+            EthercatRegister::ProcessErrorCount => 0x30D,
+            EthercatRegister::ProcessErrorCode => 0x30E,
+            EthercatRegister::LinkLayerCount => 0x310,
+            EthercatRegister::WatchdogCount => 0x442,
+            EthercatRegister::EepromConfig => 0x500,
+            EthercatRegister::EepromControlStat => 0x502,
+            EthercatRegister::EepromAddress => 0x504,
+            EthercatRegister::EepromData => 0x508,
+            EthercatRegister::FieldbusMemoryManagementUnit0 => 0x600,
+            EthercatRegister::FieldbusMemoryManagementUnit1 => 0x610,
+            EthercatRegister::FieldbusMemoryManagementUnit2 => 0x620,
+            EthercatRegister::FieldbusMemoryManagementUnit3 => 0x630,
+            EthercatRegister::SyncManager0 => 0x800,
+            EthercatRegister::SyncManager1 => 0x808,
+            EthercatRegister::SyncManager2 => 0x810,
+            EthercatRegister::SyncManager3 => 0x818,
+            EthercatRegister::SyncManager0Status => 0x805,
+            EthercatRegister::SyncManager1Status => 0x808 + 5,
+            EthercatRegister::SyncManager1Act => 0x808 + 6,
+            EthercatRegister::SyncManager1Control => 0x808 + 7,
+            EthercatRegister::DistributedClockTime0 => 0x900,
+            EthercatRegister::DistributedClockTime1 => 0x904,
+            EthercatRegister::DistributedClockTime2 => 0x908,
+            EthercatRegister::DistributedClockTime3 => 0x90C,
+            EthercatRegister::DistributedClockSystemTime => 0x910,
+            EthercatRegister::DistributedClockStartOfFrame => 0x918,
+            EthercatRegister::DistributedClockSystemOffset => 0x920,
+            EthercatRegister::DistributedClockSystemDelay => 0x928,
+            EthercatRegister::DistributedClockSystemDifference => 0x92C,
+            EthercatRegister::DistributedClockSpeedCount => 0x930,
+            EthercatRegister::DistributedClockTimeFilter => 0x934,
+            EthercatRegister::DistributedClockControlUnit => 0x980,
+            EthercatRegister::DistributedClockSynchronizationActive => 0x981,
+            EthercatRegister::DistributedClockCycle0 => 0x9A0,
+            EthercatRegister::DistributedClockCycle1 => 0x9A4,
         }
     }
 }

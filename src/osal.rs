@@ -19,3 +19,26 @@ impl OsalTimer {
         self.stop_time.elapsed().is_ok()
     }
 }
+
+#[macro_export]
+macro_rules! ec_print {
+    ($($arg:tt)*) => {{
+        if cfg!(debug_assertions) {
+            print!($($arg)*);
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! ec_println {
+    () => {
+        if cfg!(debug_assertions) {
+            println!();
+        }
+    };
+    ($($arg:tt)*) => {{
+        if cfg!(debug_assertions) {
+            println!($($arg)*);
+        }
+    }};
+}

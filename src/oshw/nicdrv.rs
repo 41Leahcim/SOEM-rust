@@ -247,9 +247,9 @@ fn initialize_socket(interface_name: &str) -> Result<i32, CError> {
 /// Basic setup connect NIC to socket.
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `interface_name`: Name of NIC device, f.e. "eth0"
-/// `secondary`: if > 0, use secondary stack instead of primary
+/// - `port`: port context struct
+/// - `interface_name`: Name of NIC device, f.e. "eth0"
+/// - `secondary`: if > 0, use secondary stack instead of primary
 pub fn setup_nic(
     port: &mut Port,
     interface_name: &str,
@@ -310,7 +310,7 @@ pub fn setup_nic(
 /// Close sockets used
 ///
 /// # Parameters
-/// `port`: port context struct
+/// - `port`: port context struct
 pub fn close_nic(port: &mut Port) -> Result<(), CloseError> {
     use crate::safe_c::close;
     if port.sockhandle.load(Ordering::Relaxed) >= 0 {
@@ -331,9 +331,9 @@ pub fn close_nic(port: &mut Port) -> Result<(), CloseError> {
 /// Set rx buffer status
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `index`: index in buffer array
-/// `bufstat`: status to set
+/// - `port`: Port context struct
+/// - `index`: index in buffer array
+/// - `bufstat`: status to set
 pub fn set_buf_stat(port: &mut Port, index: usize, bufstat: BufferState) {
     port.rx_buf_stat.lock().unwrap()[index] = bufstat;
     if let Some(redport) = port
@@ -348,7 +348,7 @@ pub fn set_buf_stat(port: &mut Port, index: usize, bufstat: BufferState) {
 /// Get new frame identifier index and allocate corresponding rx buffer
 ///
 /// # Parameters
-/// `port`: port context struct
+/// - `port`: port context struct
 ///
 /// # Returns
 /// New index
@@ -388,9 +388,9 @@ fn get_stack<'a, 'b>(port: &'a Port, stacknumber: i32) -> &'b Stack<'a> {
 /// Transmit buffer over socket (non blocking)
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `index`: index in tx buffer array
-/// `stacknumber`: 0=primary, 1=secondary (if available)
+/// - `port`: port context struct
+/// - `index`: index in tx buffer array
+/// - `stacknumber`: 0=primary, 1=secondary (if available)
 ///
 /// # Returns
 /// Socket send result
@@ -417,8 +417,8 @@ pub fn out_frame(port: &mut Port, index: usize, stacknumber: i32) -> i32 {
 /// Transmit buffer over socket (non blocking)
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `index`: index in tx buffer array
+/// - `port`: port context struct
+/// - `index`: index in tx buffer array
 ///
 /// # Returns
 /// Socket send result
@@ -468,8 +468,8 @@ pub fn out_frame_red(port: &mut Port, index: u8) -> Result<i32, NicdrvError> {
 /// Non blocking read of socket. Put frame in temporary buffer.
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `stacknumber`: 0=primary 1=secondary stack (if available)
+/// - `port`: port context struct
+/// - `stacknumber`: 0=primary 1=secondary stack (if available)
 pub fn ecx_receive_packet(port: &mut Port, stacknumber: i32) -> i32 {
     let stack = get_stack(port, stacknumber);
     let mut temp_buf = stack.temp_buf.lock().unwrap();
@@ -503,9 +503,9 @@ pub fn ecx_receive_packet(port: &mut Port, stacknumber: i32) -> i32 {
 ///      in buffer status and exit.
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `index`: requested index of frame
-/// `stacknumber`: 0=primary, 1=secondary stack (if available)
+/// - `port`: port context struct
+/// - `index`: requested index of frame
+/// - `stacknumber`: 0=primary, 1=secondary stack (if available)
 ///
 /// # Returns
 /// Workcounter if a frame is found with corresponding index, otherwise
@@ -595,9 +595,9 @@ pub fn inframe(port: &mut Port, index: u8, stacknumber: i32) -> Result<u16, Nicd
 /// how to reroute the original packet to get the data in an other try.
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `index`: requested index of frame
-/// `timer`: Absolute timeout time
+/// - `port`: port context struct
+/// - `index`: requested index of frame
+/// - `timer`: Absolute timeout time
 ///
 /// # Returns
 /// Workcounter if a frame is found with corresponding index, otherwise `NicdrvError`
@@ -702,9 +702,9 @@ pub fn wait_in_frame_red(port: &mut Port, index: u8, timer: OsalTimer) -> Result
 /// Blocking receive frame function. Calls `wait_in_frame_red`.
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `index`: Requested index of frame
-/// `timeout`: Timeout duration
+/// - `port`: Port context struct
+/// - `index`: Requested index of frame
+/// - `timeout`: Timeout duration
 ///
 /// # Returns
 /// Workcounter if a frame is found with corresponding index, otherwise `NicdrvError`
@@ -721,9 +721,9 @@ pub fn wait_in_frame(port: &mut Port, index: u8, timeout: Duration) -> Result<u1
 /// The function calls `ec_outframe_red` and `ec_waitinframe_red`.
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `index`: index of frame
-/// `timeout`: timeout duration
+/// - `port`: port context struct
+/// - `index`: index of frame
+/// - `timeout`: timeout duration
 ///
 /// # Returns
 /// Workcounter of NicdrvError

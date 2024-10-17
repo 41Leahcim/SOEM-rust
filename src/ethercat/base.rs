@@ -7,17 +7,17 @@ use crate::{
 
 use super::r#type::{
     high_word, host_to_ethercat, low_word, Buffer, BufferState, CommandType, EthercatHeader,
-    EthercatRegisters, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
+    EthercatRegister, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
     ETHERCAT_WORK_COUNTER_SIZE, ETHERNET_HEADER_SIZE,
 };
 
 /// Write data to EtherCAT datagram
 ///
 /// # Parameters
-/// `datagramdata`: data part of datagram
-/// `command`: Command being executed
-/// `length`: Length of databuffer
-/// `data`: Databuffer to be copied into datagram
+/// - `datagramdata`: data part of datagram
+/// - `command`: Command being executed
+/// - `length`: Length of databuffer
+/// - `data`: Databuffer to be copied into datagram
 fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u8]) {
     if !data.is_empty() {
         match command {
@@ -40,13 +40,13 @@ fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u
 /// Generate and set EtherCAT datagram in a standard Ethernet frame.
 ///
 /// # Parameters
-/// `frame`: framebuffer
-/// `command`: Command to execute
-/// `index`: Index used for TX and RX buffers
-/// `address_position`: Address position
-/// `address_offset`: Address offset
-/// `length`: Length of datagram excluding EtherCAT header
-/// `data`: Databuffer to be compied in datagram
+/// - `frame`: framebuffer
+/// - `command`: Command to execute
+/// - `index`: Index used for TX and RX buffers
+/// - `address_position`: Address position
+/// - `address_offset`: Address offset
+/// - `length`: Length of datagram excluding EtherCAT header
+/// - `data`: Databuffer to be compied in datagram
 pub fn setup_datagram(
     frame: &mut Buffer,
     command: CommandType,
@@ -89,13 +89,13 @@ pub fn setup_datagram(
 /// Add EtherCAT datagram to a standard ethernet frame with existing datagram(s).
 ///
 /// # Parameters
-/// `frame`: Framebuffer
-/// `command`: Command
-/// `index`: index used for TX and RX buffers
-/// `more`: true if still more datagrams will follow
-/// `address_position`: Address position
-/// `address_offset`: Address offset
-/// `data`: Databuffer to be copied in datagram
+/// - `frame`: Framebuffer
+/// - `command`: Command
+/// - `index`: index used for TX and RX buffers
+/// - `more`: true if still more datagrams will follow
+/// - `address_position`: Address position
+/// - `address_offset`: Address offset
+/// - `data`: Databuffer to be copied in datagram
 ///
 /// # Returns
 /// Offset to data in rx frame, usefull to retrieve data after RX
@@ -166,12 +166,12 @@ pub fn add_datagram(
 /// Executes a primitive command
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, normally 0
-/// `address_offsrt`: Address offset, slave memory address
-/// `data`: databuffer tobe written to or receive from slave
-/// `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
-/// `command`: command to execute
+/// - `port`: Port context struct
+/// - `address_position`: Address position, normally 0
+/// - `address_offsrt`: Address offset, slave memory address
+/// - `data`: databuffer tobe written to or receive from slave
+/// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+/// - `command`: command to execute
 ///
 /// # Returns Workcounter or error
 fn execute_primitive_command(
@@ -229,25 +229,25 @@ fn execute_primitive_command(
 /// Broadcast write primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, normally 0
-/// `address_offset`: Address offset, slave memory address
-/// `data`: databuffer to be written to slaves
-/// `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: Port context struct
+/// - `address_position`: Address position, normally 0
+/// - `address_offset`: Address offset, slave memory address
+/// - `data`: databuffer to be written to slaves
+/// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns
 /// WorkCounter or error
 pub fn bwr(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     execute_primitive_command(
         port,
         address_position,
-        address_offset,
+        address_offset as u16,
         data,
         timeout,
         CommandType::BroadcastWrite,
@@ -257,25 +257,25 @@ pub fn bwr(
 /// Broadcast read primitive (blocking)
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `address_position`: Address position, normally 0
-/// `address_offset`: Address offset, slave memory address
-/// `length`: length of databuffer
-/// `data`: databuffer to put slave data in
-/// `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: port context struct
+/// - `address_position`: Address position, normally 0
+/// - `address_offset`: Address offset, slave memory address
+/// - `length`: length of databuffer
+/// - `data`: databuffer to put slave data in
+/// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns workcounter or error
 pub fn brd(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     execute_primitive_command(
         port,
         address_position,
-        address_offset,
+        address_offset as u16,
         data,
         timeout,
         CommandType::BroadcastRead,
@@ -314,12 +314,12 @@ pub fn aprd(
 /// Auto increment read multiple write primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, each slave increments, slave that has 0 reads,
-///                     following slaves write.
-/// `address_offset`: Address offset, slave memory address
-/// `adta`: Databuffer to put slave data in
-/// `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: Port context struct
+/// - `address_position`: Address position, each slave increments, slave that has 0 reads,
+///                       following slaves write.
+/// - `address_offset`: Address offset, slave memory address
+/// - `adta`: Databuffer to put slave data in
+/// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns
 /// Workcounter or error
@@ -343,12 +343,12 @@ pub fn armw(
 /// Configured address read multiple write primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, slave with that address reads,
-///                     following slaves write.
-/// `address_offset`: Address Offset, slave memory address
-/// `data`: Databuffer to put slave data in
-/// `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+/// - `port`: Port context struct
+/// - `address_position`: Address position, slave with that address reads,
+///                       following slaves write.
+/// - `address_offset`: Address Offset, slave memory address
+/// - `data`: Databuffer to put slave data in
+/// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
@@ -372,46 +372,52 @@ pub fn frmw(
 /// Auto increment read word return primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, each slave increments, slave that has 0 reads,
-/// `address_offset`: Address offset, slave memory address
-/// `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: Port context struct
+/// - `address_position`: Address position, each slave increments, slave that has 0 reads,
+/// - `address_offset`: Address offset, slave memory address
+/// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns
 /// Word data from slave or error
 pub fn aprdw(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     let mut word = [0; 2];
-    aprd(port, address_position, address_offset, &mut word, timeout)?;
+    aprd(
+        port,
+        address_position,
+        address_offset as u16,
+        &mut word,
+        timeout,
+    )?;
     Ok(u16::from_ne_bytes(word))
 }
 
 /// Configured address read primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, slave with that address reads
-/// `address_offset`: Addddress offset, slave memory address
-/// `data`: Databuffer to put slave data in
-/// `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: Port context struct
+/// - `address_position`: Address position, slave with that address reads
+/// - `address_offset`: Addddress offset, slave memory address
+/// - `data`: Databuffer to put slave data in
+/// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns
 /// Workcounter or error
 pub fn fprd(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     execute_primitive_command(
         port,
         address_position,
-        address_offset,
+        address_offset as u16,
         data,
         timeout,
         CommandType::FixedPointerRead,
@@ -421,17 +427,17 @@ pub fn fprd(
 /// Configured address read, word return primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, slave with that address reads
-/// `address_offset`: Address offset, slave memory address
-/// `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: Port context struct
+/// - `address_position`: Address position, slave with that address reads
+/// - `address_offset`: Address offset, slave memory address
+/// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns
 /// Word data from slave
 pub fn fprdw(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     let mut word = [0; 2];
@@ -442,11 +448,11 @@ pub fn fprdw(
 /// Auto increment address write, word primitive (blocking)
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `address_position: Address position, each slave increments, slave that has 0 writes.
-/// `address_offset`: Address offset, slave memory address
-/// `data`: Databuffer to write to slave
-/// `timeout`: TImeout duration, standard is TIMEOUT_RETURN
+/// - `port`: port context struct
+/// - `address_position: Address position, each slave increments, slave that has 0 writes.
+/// - `address_offset`: Address offset, slave memory address
+/// - `data`: Databuffer to write to slave
+/// - `timeout`: TImeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
@@ -470,25 +476,25 @@ pub fn apwr(
 /// Auto increment address write, word primitive (blocking).
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position: Address position, each slave increments, slave that has 0 writes.
-/// `address_offset`: Address offset, slave memory address
-/// `data`: Word data to write to slave
-/// `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+/// - `port`: Port context struct
+/// - `address_position: Address position, each slave increments, slave that has 0 writes.
+/// - `address_offset`: Address offset, slave memory address
+/// - `data`: Word data to write to slave
+/// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
 pub fn apwrw(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     data: u16,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     apwr(
         port,
         address_position,
-        address_offset,
+        address_offset as u16,
         &mut data.to_ne_bytes(),
         timeout,
     )
@@ -497,10 +503,10 @@ pub fn apwrw(
 /// Configured address write, primitive (blocking)
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `address_position`: Address position, slave with that address writes
-/// `address_offset`: Address offset, slave memory address
-/// `data`: Databuffer to write to slave
+/// - `port`: port context struct
+/// - `address_position`: Address position, slave with that address writes
+/// - `address_offset`: Address offset, slave memory address
+/// - `data`: Databuffer to write to slave
 ///
 /// # Returns
 /// Workcounter or error
@@ -524,25 +530,25 @@ pub fn fpwr(
 /// Configured address write, word primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `address_position`: Address position, slave with that address writes
-/// `address_offsrt`: Address offset, slave memory address
-/// `data`: Word to write to slave
-/// `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+/// - `port`: Port context struct
+/// - `address_position`: Address position, slave with that address writes
+/// - `address_offsrt`: Address offset, slave memory address
+/// - `data`: Word to write to slave
+/// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
 pub fn fpwrw(
     port: &mut Port,
     address_position: u16,
-    address_offset: u16,
+    address_offset: EthercatRegister,
     data: u16,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     fpwr(
         port,
         address_position,
-        address_offset,
+        address_offset as u16,
         &mut data.to_ne_bytes(),
         timeout,
     )
@@ -551,10 +557,10 @@ pub fn fpwrw(
 /// Logical memory read/write primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `logical_address`: Logical memory address
-/// `data`: Databuffer to write to and read from slave
-/// `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+/// - `port`: Port context struct
+/// - `logical_address`: Logical memory address
+/// - `data`: Databuffer to write to and read from slave
+/// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
@@ -577,10 +583,10 @@ pub fn lrw(
 /// Logical memory read primitive (blocking)
 ///
 /// # Parameters
-/// `port`: port context struct
-/// `logical_address`: Logical memory address
-/// `data`: Databuffer to read from slave
-/// `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+/// - `port`: port context struct
+/// - `logical_address`: Logical memory address
+/// - `data`: Databuffer to read from slave
+/// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
@@ -603,10 +609,10 @@ pub fn lrd(
 /// Logical memory write primitive (blocking)
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `logical_address`: Logical memory address
-/// `data`: Databuffer to write to slave
-/// `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+/// - `port`: Port context struct
+/// - `logical_address`: Logical memory address
+/// - `data`: Databuffer to write to slave
+/// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
 /// # Returns
 /// Workcounter or error
@@ -630,12 +636,12 @@ pub fn lwr(
 /// Frame consists of 2 datagrams, 1 logical read write and 1 FixedPointerMultiWrite.
 ///
 /// # Parameters
-/// `port`: Port context struct
-/// `logical_address`: Logical memory address
-/// `data`: Databuffer to write to and read from slave
-/// `distributed_clock_reference_slave`: Distributed clock reference slave address
-/// `distributed_clock_time`: Distributed clock time read from reference slave
-/// `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
+/// - `port`: Port context struct
+/// - `logical_address`: Logical memory address
+/// - `data`: Databuffer to write to and read from slave
+/// - `distributed_clock_reference_slave`: Distributed clock reference slave address
+/// - `distributed_clock_time`: Distributed clock time read from reference slave
+/// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
 /// # Returns
 /// Workcounter or error
@@ -669,7 +675,7 @@ pub fn lrwdc(
             index,
             false,
             distributed_clock_reference_slave,
-            EthercatRegisters::DistributedClockSystemTime.into(),
+            EthercatRegister::DistributedClockSystemTime.into(),
             &mut distributed_clock_to_ethercat.to_ne_bytes(),
         )
     };

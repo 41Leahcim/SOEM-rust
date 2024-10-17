@@ -8,7 +8,9 @@ use std::{
 use heapless::String as HeaplessString;
 use oshw::nicdrv::{Port, RedPort};
 
-use super::r#type::{Error, ErrorInfo, MailboxError, MAX_BUF_COUNT};
+use super::r#type::{
+    Error, ErrorInfo, EthercatState, MailboxError, SiiCategory, SiiGeneralItem, MAX_BUF_COUNT,
+};
 use crate::oshw;
 
 /// Max. entries in EtherCAT error list
@@ -64,10 +66,25 @@ pub struct Fmmu {
     pub unused2: u16,
 }
 
+impl From<&mut Fmmu> for &mut [u8] {
+    fn from(value: &mut Fmmu) -> Self {
+        unsafe { slice::from_raw_parts_mut((value as *mut Fmmu).cast(), size_of::<Fmmu>()) }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct SyncManager {
     pub start_address: u16,
     pub sm_length: u16,
     pub sm_flags: u32,
+}
+
+impl From<&mut SyncManager> for &mut [u8] {
+    fn from(value: &mut SyncManager) -> Self {
+        unsafe {
+            slice::from_raw_parts_mut((value as *mut SyncManager).cast(), size_of::<SyncManager>())
+        }
+    }
 }
 
 pub struct StateStatus {
@@ -85,6 +102,18 @@ pub enum MailboxProtocol {
     VendorOverEthercat = 0x20,
 }
 
+impl From<MailboxProtocol> for u8 {
+    fn from(value: MailboxProtocol) -> Self {
+        value as u8
+    }
+}
+
+impl From<MailboxProtocol> for u16 {
+    fn from(value: MailboxProtocol) -> Self {
+        value as u16
+    }
+}
+
 /// CANopen over Ethercat Device Profile
 pub enum Coedet {
     ServiceDataObject = 1,
@@ -97,13 +126,19 @@ pub enum Coedet {
     Sdoca = 0x20,
 }
 
+impl From<Coedet> for u8 {
+    fn from(value: Coedet) -> Self {
+        value as u8
+    }
+}
+
 pub const SYNC_MANAGER_ENABLE_MASK: u32 = 0xFFFE_FFFF;
 
+#[derive(Debug, Clone, Copy)]
 pub struct InvalidSyncManagerType(u8);
 
 /// Sync manager type
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncManagerType {
     Unused,
     MailboxWrite,
@@ -145,7 +180,7 @@ pub enum EepReadSize {
 }
 
 /// Detected EtherCAT slave
-pub struct Slave {
+pub struct Slave<'slave> {
     /// State of slave
     pub state: u16,
 
@@ -171,7 +206,7 @@ pub struct Slave {
     pub output_bits: u16,
 
     /// Output bytes, if output_bits < 8, output_bytes = 0
-    pub output_bytes: u32,
+    pub output_bytes: u16,
 
     /// Output IOmap buffer
     pub outputs: Vec<u8>,
@@ -185,7 +220,7 @@ pub struct Slave {
     pub input_bytes: u16,
 
     /// Input IOmap buffer
-    pub input: Vec<u8>,
+    pub input: Option<&'slave [u8]>,
 
     /// Startbit in IOmap buffer
     pub input_startbit: u8,
@@ -212,6 +247,9 @@ pub struct Slave {
     pub mailbox_length: u16,
 
     pub mailbox_write_offset: u16,
+
+    // Length of read mailbox in bytes
+    pub mailbox_read_length: u16,
     pub mailbox_read_offset: u16,
 
     /// Supported mailbox protocols
@@ -240,6 +278,9 @@ pub struct Slave {
 
     /// Port number on parent this slave is connected to
     pub parent_port: u8,
+
+    // 0 = master
+    pub parent: u8,
 
     /// Port number on this slave the parent is connected to
     pub entry_port: u8,
@@ -287,10 +328,11 @@ pub struct Slave {
 
     pub canopen_over_ethercat_details: u8,
     pub file_over_ethercat_details: u8,
+    pub ethernet_over_ethercat_details: u8,
     pub servo_over_ethercat_details: u8,
 
     /// E-bus current
-    pub ebus_current: u8,
+    pub ebus_current: u16,
 
     /// If > 0 block use of LRW in processdata
     pub block_logical_read_write: u8,
@@ -304,15 +346,16 @@ pub struct Slave {
     pub is_lost: bool,
 
     /// Registered configuration function PO -> SO (DEPRECATED)
-    pub po2_so_config: fn(slave: u16) -> i32,
+    pub po2_so_config: Option<fn(slave: u16) -> i32>,
 
     /// Registered configuration function PO->SO
-    pub po2_so_configx: fn(context: &mut Context, slave: u16) -> i32,
+    pub po2_so_configx: Option<fn(context: &mut Context, slave: u16) -> i32>,
 
-    pub readable_name: HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }>,
+    pub name: HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }>,
 }
 
 ///EtherCAT slave group
+#[derive(Debug)]
 pub struct SlaveGroup {
     /// Logical start address for this group
     pub logical_start_address: u32,
@@ -358,13 +401,37 @@ pub struct SlaveGroup {
     pub io_segments: [u32; MAX_IO_SEGMENTS],
 }
 
+impl Default for SlaveGroup {
+    fn default() -> Self {
+        Self {
+            logical_start_address: 0,
+            output_bytes: 0,
+            outputs: Vec::new(),
+            input_bytes: 0,
+            inputs: Vec::new(),
+            has_dc: false,
+            dc_next: 0,
+            ebus_current: 0,
+            block_logical_read_write: 0,
+            used_segment_count: 0,
+            first_input_segment: 0,
+            work_counter_outputs: 0,
+            work_counter_inputs: 0,
+            check_slaves_states: false,
+            io_segments: [0; MAX_IO_SEGMENTS],
+        }
+    }
+}
+
 /// Eeprom Fieldbus Memory Management Unit
+#[derive(Debug, Clone, Copy)]
 pub struct EepromFmmu {
     pub start_position: u16,
     pub number_fmmu: u8,
     pub fmmu: [u8; 4],
 }
 
+#[derive(Debug, Clone)]
 pub struct EepromSyncManager {
     pub start_position: u16,
     pub number_sync_manager: u8,
@@ -382,6 +449,7 @@ pub struct EepromSyncManager {
 }
 
 /// Eeprom Process Data Object
+#[derive(Debug)]
 pub struct EepromPdo {
     pub start_position: u16,
     pub length: u16,
@@ -390,6 +458,20 @@ pub struct EepromPdo {
     pub sync_manager: [u16; MAX_EE_PDO],
     pub bitsize: [u16; MAX_EE_PDO],
     pub sync_manager_bit_size: [u16; MAX_EE_PDO],
+}
+
+impl Default for EepromPdo {
+    fn default() -> Self {
+        Self {
+            start_position: 0,
+            length: 0,
+            number_pdo: 0,
+            index: [0; MAX_EE_PDO],
+            sync_manager: [0; MAX_EE_PDO],
+            bitsize: [0; MAX_EE_PDO],
+            sync_manager_bit_size: [0; MAX_EE_PDO],
+        }
+    }
 }
 
 /// Mailbox buffer array
@@ -576,18 +658,18 @@ pub struct Context<'context> {
     /// Port reference may include red port
     pub port: Arc<Mutex<Port<'context>>>,
 
-    pub slavelist: Arc<Mutex<[Slave]>>,
+    pub slavelist: Vec<Slave<'context>>,
 
     /// Number of slaves found in configuration
-    pub slave_count: Vec<usize>,
+    pub slave_count: u16,
 
     /// Maximum nummber of slaves allowed in slavelist
-    pub max_slaves: usize,
+    pub max_slaves: u16,
 
-    pub grouplist: &'context mut [SlaveGroup],
+    pub grouplist: Vec<SlaveGroup>,
 
     /// Maximum number of groups allowed in grouplist
-    pub max_group: i32,
+    pub max_group: u32,
 
     /// Internal reference to eeprom cache buffer
     esibuf: &'context mut [u8],
@@ -620,7 +702,10 @@ pub struct Context<'context> {
     pub pdo_description: Vec<PdoDescription>,
 
     /// Internal eeprom sync manager list
-    eep_sync_manager: Vec<EepromSyncManager>,
+    pub eep_sync_manager: EepromSyncManager,
+
+    // Internal eeprom FMMU list
+    pub eep_fmmu: EepromFmmu,
 
     /// Registered file over ethercat hook
     pub file_over_ethercat_hook: fn(slave: u16, packetnumber: i32, datasize: i32) -> i32,
@@ -634,7 +719,7 @@ pub struct Context<'context> {
 
     /// Userdata promotes application configuration especially in EC_VER2 with multiple ec_context
     /// instances.
-    pub userdata: Vec<Box<dyn Any>>,
+    pub userdata: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -699,11 +784,16 @@ pub fn sii_get_byte(context: &mut Context, slave: u16, address: u16) -> u8 {
     todo!()
 }
 
-pub fn sii_find(context: &mut Context, slave: u16, address: u16) -> u8 {
+pub fn sii_find(context: &mut Context, slave: u16, address: SiiCategory) -> u16 {
     todo!()
 }
 
-pub fn sii_string(context: &mut Context, str: &mut String, slave: u16, sn: u16) {
+pub fn sii_string<const STRING_SIZE: usize>(
+    context: &mut Context,
+    str: &mut HeaplessString<STRING_SIZE>,
+    slave: u16,
+    sn: u16,
+) {
     todo!()
 }
 
@@ -711,11 +801,15 @@ pub fn sii_fmmu(context: &mut Context, slave: u16, fmmu: &mut EepromFmmu) -> u16
     todo!()
 }
 
-pub fn sii_sm(context: &mut Context, slave: u16, sm: &mut EepromSyncManager, n: u16) -> u16 {
+pub fn sii_sm(context: &mut Context, slave: u16, sm: &mut EepromSyncManager) -> u16 {
     todo!()
 }
 
-pub fn sii_pdo(context: &mut Context, slave: u16, pdo: &mut EepromPdo, t: u8) {
+pub fn sii_sm_next(context: &mut Context, slave: u16, sm: &mut EepromSyncManager, n: u16) -> u16 {
+    todo!()
+}
+
+pub fn sii_pdo(context: &mut Context, slave: u16, pdo: &mut EepromPdo, t: u8) -> u32 {
     todo!()
 }
 
@@ -727,7 +821,12 @@ pub fn writestate(context: &mut Context) -> i32 {
     todo!()
 }
 
-pub fn statecheck(context: &mut Context, slave: u16, request_state: u16, timeout: Duration) -> u16 {
+pub fn statecheck(
+    context: &mut Context,
+    slave: u16,
+    request_state: EthercatState,
+    timeout: Duration,
+) -> u16 {
     todo!()
 }
 
@@ -789,7 +888,7 @@ pub fn write_eeprom_fp(
     todo!()
 }
 
-pub fn read_eeprom1(context: &mut Context, slave: u16, eeproma: u16) {
+pub fn read_eeprom1(context: &mut Context, slave: u16, eeprom_address: SiiGeneralItem) {
     todo!()
 }
 
