@@ -1,7 +1,8 @@
-use core::slice;
 use core::str;
 use std::array;
-use std::mem::transmute;
+use std::io;
+use std::io::Read;
+use std::io::Write;
 use std::num::TryFromIntError;
 use std::str::Utf8Error;
 use std::time::Duration;
@@ -18,10 +19,12 @@ use crate::ethercat::r#type::{
 };
 
 use super::main::InvalidSyncManagerType;
+use super::main::SyncManagerCommunicationType;
 use super::main::{
     push_error, Context, MailboxHeader, MailboxIn, MailboxOut, PacketError, MAX_NAME_LENGTH,
 };
 use super::r#type::Datatype;
+use super::r#type::InvalidCommand;
 use super::r#type::InvalidDataType;
 use super::r#type::TIMEOUT_RX_MAILBOX;
 use super::r#type::{AbortError, COEObjectDescriptionCommand, ErrorInfo, ErrorType, MailboxError};
@@ -30,17 +33,10 @@ use super::r#type::{AbortError, COEObjectDescriptionCommand, ErrorInfo, ErrorTyp
 #[derive(Debug)]
 pub struct InvalidSDOSize;
 
-/// Invalid Service Data Object Service size
-#[derive(Debug)]
-pub enum SDOServiceTryFromBytesError {
-    InvalidSize(usize),
-    InvalidOpcode,
-}
-
 #[derive(Debug)]
 pub enum CoEError {
     InvalidSDOSize(InvalidSDOSize),
-    SDOServiceTryFromBytes(SDOServiceTryFromBytesError),
+    InvalidOpcode(InvalidCommand),
     Mailbox(MailboxError),
     Packet(PacketError),
     Abort(AbortError),
@@ -49,6 +45,7 @@ pub enum CoEError {
     TryFromInt(TryFromIntError),
     InvalidDataType(InvalidDataType),
     Utf8(Utf8Error),
+    Io(io::Error),
 }
 
 impl From<InvalidSDOSize> for CoEError {
@@ -57,9 +54,15 @@ impl From<InvalidSDOSize> for CoEError {
     }
 }
 
-impl From<SDOServiceTryFromBytesError> for CoEError {
-    fn from(value: SDOServiceTryFromBytesError) -> Self {
-        Self::SDOServiceTryFromBytes(value)
+impl From<InvalidCommand> for CoEError {
+    fn from(value: InvalidCommand) -> Self {
+        Self::InvalidOpcode(value)
+    }
+}
+
+impl From<io::Error> for CoEError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
     }
 }
 
@@ -108,69 +111,64 @@ impl From<Utf8Error> for CoEError {
 /// Variants for easy data access
 
 #[allow(dead_code)]
+#[derive(Debug)]
 enum ServiceData {
     Byte([u8; 0x200]),
     Word([u16; 0x100]),
     Long([u32; 0x80]),
 }
 
+impl Default for ServiceData {
+    fn default() -> Self {
+        Self::Byte([0; 0x200])
+    }
+}
+
 impl ServiceData {
-    pub const fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8; 512] {
         match self {
             ServiceData::Byte(bytes) => bytes,
-            ServiceData::Word(words) => unsafe { transmute::<&[u16; 256], &[u8; 512]>(words) },
-            ServiceData::Long(longs) => unsafe { transmute::<&[u32; 128], &[u8; 512]>(longs) },
+            ServiceData::Word(words) => bytemuck::cast_ref(words),
+            ServiceData::Long(longs) => bytemuck::cast_ref(longs),
         }
     }
 
-    pub const fn as_words(&self) -> &[u16] {
+    pub fn as_words(&self) -> &[u16; 256] {
         match self {
-            ServiceData::Byte(bytes) => unsafe { transmute::<&[u8; 512], &[u16; 256]>(bytes) },
+            ServiceData::Byte(bytes) => bytemuck::cast_ref(bytes),
             ServiceData::Word(words) => words,
-            ServiceData::Long(longs) => unsafe { transmute::<&[u32; 128], &[u16; 256]>(longs) },
+            ServiceData::Long(longs) => bytemuck::cast_ref(longs),
         }
     }
 
-    pub const fn as_longs(&self) -> &[u32] {
+    pub fn as_longs(&self) -> &[u32; 128] {
         match self {
-            ServiceData::Byte(bytes) => unsafe { transmute::<&[u8; 512], &[u32; 128]>(bytes) },
-            ServiceData::Word(words) => unsafe { transmute::<&[u16; 256], &[u32; 128]>(words) },
+            ServiceData::Byte(bytes) => bytemuck::cast_ref(bytes),
+            ServiceData::Word(words) => bytemuck::cast_ref(words),
             ServiceData::Long(longs) => longs,
         }
     }
 
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+    pub fn as_bytes_mut(&mut self) -> &mut [u8; 512] {
         match self {
             ServiceData::Byte(bytes) => bytes,
-            ServiceData::Word(words) => unsafe {
-                transmute::<&mut [u16; 256], &mut [u8; 512]>(words)
-            },
-            ServiceData::Long(longs) => unsafe {
-                transmute::<&mut [u32; 128], &mut [u8; 512]>(longs)
-            },
+            ServiceData::Word(words) => bytemuck::cast_mut(words),
+            ServiceData::Long(longs) => bytemuck::cast_mut(longs),
         }
     }
 
-    pub fn as_words_mut(&mut self) -> &mut [u16] {
+    pub fn as_words_mut(&mut self) -> &mut [u16; 256] {
         match self {
-            ServiceData::Byte(bytes) => unsafe {
-                transmute::<&mut [u8; 512], &mut [u16; 256]>(bytes)
-            },
+            ServiceData::Byte(bytes) => bytemuck::cast_mut(bytes),
             ServiceData::Word(words) => words,
-            ServiceData::Long(longs) => unsafe {
-                transmute::<&mut [u32; 128], &mut [u16; 256]>(longs)
-            },
+            ServiceData::Long(longs) => bytemuck::cast_mut(longs),
         }
     }
 
-    pub fn as_longs_mut(&mut self) -> &mut [u32] {
+    pub fn as_longs_mut(&mut self) -> &mut [u32; 128] {
         match self {
-            ServiceData::Byte(bytes) => unsafe {
-                transmute::<&mut [u8; 512], &mut [u32; 128]>(bytes)
-            },
-            ServiceData::Word(words) => unsafe {
-                transmute::<&mut [u16; 256], &mut [u32; 128]>(words)
-            },
+            ServiceData::Byte(bytes) => bytemuck::cast_mut(bytes),
+            ServiceData::Word(words) => bytemuck::cast_mut(words),
             ServiceData::Long(longs) => longs,
         }
     }
@@ -178,6 +176,7 @@ impl ServiceData {
 
 /// Service Data Object structure, not to be confused with `ServiceDataObjectService`
 
+#[derive(Debug, Default)]
 struct ServiceDataObject {
     mailbox_header: MailboxHeader,
     can_open: u16,
@@ -187,37 +186,68 @@ struct ServiceDataObject {
     data: ServiceData,
 }
 
-impl TryFrom<&mut [u8]> for &mut ServiceDataObject {
-    type Error = InvalidSDOSize;
-
-    fn try_from(value: &mut [u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            Err(InvalidSDOSize)
-        } else {
-            Ok(unsafe { &mut slice::from_raw_parts_mut((value as *mut [u8]).cast(), 1)[0] })
+impl ServiceDataObject {
+    pub fn write_to(&self, bytes: &mut impl Write) -> Result<usize, usize> {
+        let mut bytes_written = self.mailbox_header.write_to(bytes)?;
+        match bytes.write(&self.can_open.to_ne_bytes()) {
+            Ok(bytes) if bytes < size_of::<u16>() => return Err(bytes + bytes_written),
+            Ok(bytes) => bytes_written += bytes,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(&[self.command]) {
+            Ok(bytes) if bytes < size_of::<u8>() => return Err(bytes + bytes_written),
+            Ok(bytes) => bytes_written += bytes,
+            Err(_) => return Err(bytes_written),
+        };
+        match bytes.write(&self.index.to_ne_bytes()) {
+            Ok(bytes) if bytes < size_of::<u16>() => return Err(bytes + bytes_written),
+            Ok(bytes) => bytes_written += bytes,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(&[self.sub_index]) {
+            Ok(bytes) if bytes < size_of::<u8>() => return Err(bytes + bytes_written),
+            Ok(bytes) => bytes_written += bytes,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(self.data.as_bytes()) {
+            Ok(bytes) if bytes < self.data.as_bytes().len() => Err(bytes + bytes_written),
+            Ok(bytes) => Ok(bytes + bytes_written),
+            Err(_) => Err(bytes_written),
         }
     }
-}
 
-impl From<&mut ServiceDataObject> for &mut [u8] {
-    fn from(value: &mut ServiceDataObject) -> Self {
-        unsafe {
-            slice::from_raw_parts_mut(
-                (value as *mut ServiceDataObject).cast(),
-                size_of::<ServiceDataObject>(),
-            )
-        }
+    pub fn read_from<R: Read>(bytes: &mut R) -> io::Result<Self> {
+        let mailbox_header = MailboxHeader::read_from(bytes).unwrap();
+        let mut value = [0; 6 + 512];
+        bytes.read_exact(&mut value)?;
+        let can_open = u16::from_ne_bytes(value[..2].try_into().unwrap());
+        let command = value[2];
+        let index = u16::from_ne_bytes(value[3..5].try_into().unwrap());
+        let sub_index = value[5];
+        let data = ServiceData::Byte(value[6..6 + 512].try_into().unwrap());
+        Ok(Self {
+            mailbox_header,
+            can_open,
+            command,
+            index,
+            sub_index,
+            data,
+        })
     }
-}
 
-impl From<&ServiceDataObject> for &[u8] {
-    fn from(value: &ServiceDataObject) -> Self {
-        unsafe {
-            slice::from_raw_parts(
-                (value as *const ServiceDataObject).cast(),
-                size_of::<ServiceDataObject>(),
-            )
-        }
+    pub fn read_from_index<R: Read>(&mut self, bytes: &mut R) -> io::Result<()> {
+        let mut value = [0; 512 + 3];
+        bytes.read_exact(&mut value).unwrap();
+        self.index = u16::from_ne_bytes(value[0..2].try_into().unwrap());
+        self.sub_index = value[2];
+        self.data = ServiceData::Byte(value[3..3 + 512].try_into().unwrap());
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> [u8; size_of::<MailboxHeader>() + 6 + 512] {
+        let mut bytes = [0; size_of::<MailboxHeader>() + 6 + 512];
+        self.write_to(&mut bytes.as_mut_slice()).unwrap();
+        bytes
     }
 }
 
@@ -239,14 +269,7 @@ impl ServiceDataObject {
     }
 }
 
-impl ServiceDataObject {
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        self.into()
-    }
-}
-
 /// Service Data Object service structure
-
 struct ServiceDataObjectService {
     mailbox_header: MailboxHeader,
     can_open: u16,
@@ -256,21 +279,62 @@ struct ServiceDataObjectService {
     data: ServiceData,
 }
 
-impl TryFrom<&mut [u8]> for &mut ServiceDataObjectService {
-    type Error = SDOServiceTryFromBytesError;
-
-    fn try_from(value: &mut [u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            Err(SDOServiceTryFromBytesError::InvalidSize(value.len()))
-        } else {
-            let sdo_info: &mut Self =
-                unsafe { &mut slice::from_raw_parts_mut((value as *mut [u8]).cast(), 1)[0] };
-            if sdo_info.opcode.is_valid() {
-                Ok(sdo_info)
-            } else {
-                Err(SDOServiceTryFromBytesError::InvalidOpcode)
-            }
+impl Default for ServiceDataObjectService {
+    fn default() -> Self {
+        Self {
+            mailbox_header: MailboxHeader::default(),
+            can_open: 0,
+            opcode: COEObjectDescriptionCommand::default(),
+            reserved: 0,
+            fragments: 0,
+            data: ServiceData::Byte([0; 512]),
         }
+    }
+}
+
+impl ServiceDataObjectService {
+    pub fn write_to<W: Write>(&self, bytes: &mut W) -> Result<usize, usize> {
+        let mut bytes_written = self.mailbox_header.write_to(bytes)?;
+        match bytes.write(&self.can_open.to_ne_bytes()) {
+            Ok(written) if written < 2 => return Err(bytes_written + written),
+            Ok(written) => bytes_written += written,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(&[u8::from(self.opcode), self.reserved]) {
+            Ok(written) if written < 2 => return Err(bytes_written + written),
+            Ok(written) => bytes_written += written,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(&self.fragments.to_ne_bytes()) {
+            Ok(written) if written < 2 => return Err(bytes_written + written),
+            Ok(written) => bytes_written += written,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(self.data.as_bytes()) {
+            Ok(written) if written < 2 => return Err(bytes_written + written),
+            Ok(written) => bytes_written += written,
+            Err(_) => return Err(bytes_written),
+        }
+        Ok(bytes_written)
+    }
+
+    pub fn read_from<R: Read>(bytes: &mut R) -> Result<Self, CoEError> {
+        let mailbox_header = MailboxHeader::read_from(bytes)?;
+        let mut value = [0; 6 + 512];
+        bytes.read_exact(&mut value)?;
+        let can_open = u16::from_ne_bytes(value[..2].try_into().unwrap());
+        let opcode = COEObjectDescriptionCommand::try_from(value[2])?;
+        let reserved = value[3];
+        let fragments = u16::from_ne_bytes(value[4..6].try_into().unwrap());
+        let data = ServiceData::Byte(value[6..6 + 512].try_into().unwrap());
+        Ok(Self {
+            mailbox_header,
+            can_open,
+            opcode,
+            reserved,
+            fragments,
+            data,
+        })
     }
 }
 
@@ -461,7 +525,7 @@ pub fn sdo_read(
     // Empty slave out mailbox, if something is in it. Timeout set to 0.
     mailbox_in.receive(context, slave, Duration::default())?;
     let mut mailbox_out = MailboxOut::default();
-    let mut sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
+    let mut sdo = ServiceDataObject::default();
     sdo.mailbox_header.length = host_to_ethercat(0xa);
     sdo.mailbox_header.address = host_to_ethercat(0);
     sdo.mailbox_header.priority = 0;
@@ -494,6 +558,7 @@ pub fn sdo_read(
     sdo.data.as_longs_mut()[0] = 0;
 
     // Send CANopen over EtherCAT request to slave
+    sdo.write_to(&mut mailbox_out).unwrap();
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Clean mailbox buffer
@@ -501,9 +566,9 @@ pub fn sdo_read(
 
     // Read slave response
     mailbox_in.receive(context, slave, timeout)?;
+    let mut a_sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
 
     // Slave response should be CANopen over EtherCAT, a Service Data Object response, and use the correct index
-    let a_sdo = <&mut ServiceDataObject>::try_from(mailbox_in.as_mut())?;
     if matches!(
         MailboxType::try_from(a_sdo.mailbox_header.mailbox_type & 0xF)?,
         MailboxType::CanopenOverEthercat
@@ -555,7 +620,7 @@ pub fn sdo_read(
                     let mut segments_left = true;
                     let mut toggle = 0x00;
                     while segments_left {
-                        sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
+                        sdo = ServiceDataObject::default();
                         sdo.mailbox_header.length = host_to_ethercat(0xA);
                         sdo.mailbox_header.address = host_to_ethercat(0);
                         sdo.mailbox_header.priority = 0;
@@ -581,12 +646,14 @@ pub fn sdo_read(
                         sdo.data.as_longs_mut()[0] = 0;
 
                         // Send segmented upload request to slave
+                        sdo.write_to(&mut mailbox_out).unwrap();
                         mailbox_out.send(context, slave, timeout)?;
 
                         mailbox_in.clear();
 
                         // Read slave response
                         mailbox_in.receive(context, slave, timeout)?;
+                        a_sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
 
                         // Slave response should be CANopen over EtherCAT, SDO response
                         if matches!(
@@ -615,7 +682,7 @@ pub fn sdo_read(
                                 // Copy to parameter buffer
                                 let index_offset = a_sdo.index_offset();
                                 parameter_buffer[hp..].copy_from_slice(
-                                    &a_sdo.as_bytes_mut()
+                                    &a_sdo.to_bytes()
                                         [index_offset..index_offset + usize::from(frame_data_size)],
                                 );
                             } else {
@@ -624,7 +691,7 @@ pub fn sdo_read(
                                 // Copy to parameter buffer
                                 let index_offset = a_sdo.index_offset();
                                 parameter_buffer[hp..].copy_from_slice(
-                                    &a_sdo.as_bytes_mut()
+                                    &a_sdo.to_bytes()
                                         [index_offset..index_offset + usize::from(frame_data_size)],
                                 );
 
@@ -637,7 +704,7 @@ pub fn sdo_read(
                         } else {
                             // Unexpected frame returned from slave
                             return Err(handle_invalid_slave_response(
-                                a_sdo, context, slave, index, sub_index,
+                                &a_sdo, context, slave, index, sub_index,
                             ));
                         }
                         toggle ^= 0x10;
@@ -667,7 +734,7 @@ pub fn sdo_read(
 
         // SDO abort frame received
         return Err(handle_invalid_slave_response(
-            a_sdo, context, slave, index, sub_index,
+            &a_sdo, context, slave, index, sub_index,
         ));
     }
 
@@ -706,8 +773,8 @@ pub fn sdo_write(
     mailbox_in.receive(context, slave, Duration::default())?;
 
     let mut mailbox_out = MailboxOut::default();
-    let a_sdo = <&mut ServiceDataObject>::try_from(mailbox_in.as_mut())?;
-    let sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
+    let a_sdo;
+    let mut sdo = ServiceDataObject::default();
 
     // Data section = mailbox size - 6 mailbox - 2 CANopen over EtherCAT - 8 service data object requests
     let mut maxdata = context.slavelist[usize::from(slave)].mailbox_length - 0x10;
@@ -737,12 +804,14 @@ pub fn sdo_write(
         sdo.data.as_bytes_mut().copy_from_slice(parameter_buffer);
 
         // Send mailbox SDO download request to slave
+        sdo.write_to(&mut mailbox_out).unwrap();
         mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
         mailbox_in.clear();
 
         // Read slave response
         mailbox_in.receive(context, slave, timeout)?;
+        a_sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
 
         if !(matches!(
             MailboxType::try_from(a_sdo.mailbox_header.mailbox_type & 0xF)?,
@@ -754,7 +823,7 @@ pub fn sdo_write(
             && a_sdo.sub_index == sdo.sub_index)
         {
             return Err(handle_invalid_slave_response(
-                a_sdo, context, slave, index, sub_index,
+                &a_sdo, context, slave, index, sub_index,
             ));
         }
     } else {
@@ -799,12 +868,14 @@ pub fn sdo_write(
         parameter_buffer = &mut parameter_buffer[usize::from(frame_data_size)..];
 
         // Send mailbox SDO download request to slave
+        sdo.write_to(&mut mailbox_out).unwrap();
         mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
         mailbox_in.clear();
 
         // Read slave response
         mailbox_in.receive(context, slave, timeout)?;
+        a_sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
 
         // Response should be a SDO response send over CANopen over EtherCAT, containing the correct index and subindex
         if matches!(
@@ -855,18 +926,19 @@ pub fn sdo_write(
                 sdo.command += toggle;
 
                 // Copy parameter data to mailbox
-                let index_offset = a_sdo.index_offset();
-                sdo.as_bytes_mut()[index_offset..]
-                    .copy_from_slice(&parameter_buffer[..usize::from(frame_data_size)]);
+                sdo.read_from_index(&mut &parameter_buffer[..usize::from(frame_data_size)])
+                    .unwrap();
                 parameter_buffer = &mut parameter_buffer[usize::from(frame_data_size)..];
 
                 // Send Service Data Object download request
+                sdo.write_to(&mut mailbox_out).unwrap();
                 mailbox_out.send(context, slave, timeout)?;
 
                 mailbox_in.clear();
 
                 // Read slave response
                 mailbox_in.receive(context, slave, timeout)?;
+                sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
                 if !(matches!(
                     MailboxType::try_from(sdo.mailbox_header.mailbox_type & 0xF)?,
                     MailboxType::CanopenOverEthercat
@@ -876,14 +948,14 @@ pub fn sdo_write(
                 ) && a_sdo.command & 0xE0 == 0x20)
                 {
                     return Err(handle_invalid_slave_response(
-                        a_sdo, context, slave, index, sub_index,
+                        &a_sdo, context, slave, index, sub_index,
                     ));
                 }
                 toggle ^= 0x10;
             }
         } else {
             return Err(handle_invalid_slave_response(
-                a_sdo, context, slave, index, sub_index,
+                &a_sdo, context, slave, index, sub_index,
             ));
         }
     }
@@ -914,7 +986,7 @@ pub fn rx_pdo(
     mailbox_in.receive(context, slave, Duration::default())?;
 
     let mut mailbox_out = MailboxOut::default();
-    let sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
+    let mut sdo = ServiceDataObject::default();
 
     // Data section = mailbox size - 6 mailbox - 2 CANopen over EtherCAT
     let max_data = context.slavelist[usize::from(slave)].mailbox_length - 8;
@@ -940,6 +1012,7 @@ pub fn rx_pdo(
         .copy_from_slice(&pdo_buffer[..usize::from(framedatasize)]);
 
     // Send mailbox Receive PDO request
+    sdo.write_to(&mut mailbox_out).unwrap();
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
     Ok(())
 }
@@ -969,7 +1042,7 @@ pub fn tx_pdo(
     // Empty slave output mailbox if something is in it. With timeout set to 0.
     mailbox_in.receive(context, slave, Duration::default())?;
     let mut mailbox_out = MailboxOut::default();
-    let sdo = <&mut ServiceDataObject>::try_from(mailbox_out.as_mut())?;
+    let mut sdo = ServiceDataObject::default();
     sdo.mailbox_header.length = host_to_ethercat(2);
     sdo.mailbox_header.address = host_to_ethercat(0);
     sdo.mailbox_header.priority = 0;
@@ -985,6 +1058,7 @@ pub fn tx_pdo(
     sdo.can_open =
         host_to_ethercat(tx_pdo_number & 0x1FF) + ((COEMailboxType::TxPdoRR as u16) << 12);
 
+    sdo.write_to(&mut mailbox_out).unwrap();
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Clear mailboxbuffer
@@ -992,8 +1066,7 @@ pub fn tx_pdo(
 
     // Read slave response
     mailbox_in.receive(context, slave, timeout)?;
-
-    let a_sdo = <&mut ServiceDataObject>::try_from(mailbox_in.as_mut())?;
+    let a_sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
 
     if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
         && ethercat_to_host(a_sdo.can_open) >> 12 == u16::from(COEMailboxType::TxPdo)
@@ -1151,7 +1224,7 @@ fn read_pdo_assign_complete_access(
     pdo_assign: u16,
 ) -> Result<u32, CoEError> {
     // Find maximum size of PDOassign buffer
-    let mut pdo_assign_copy = context.pdo_assign[thread_number].clone();
+    let mut pdo_assign_copy = context.pdo_assign[thread_number];
     pdo_assign_copy.number = 0;
 
     // Read rxPDOassign in complete access mode, all subindexes areread in one struct
@@ -1176,7 +1249,7 @@ fn read_pdo_assign_complete_access(
         .map(ethercat_to_host)
         .filter(|index| *index > 0)
         .map(|index| {
-            let mut pdo_description = context.pdo_description[thread_number].clone();
+            let mut pdo_description = context.pdo_description[thread_number];
             pdo_description.number = 0;
             sdo_read(
                 context,
@@ -1364,8 +1437,10 @@ pub fn read_pdo_map_complete_access(
     (*input_size, *output_size) = (0, 0);
     context.sync_manager_communication_type[thread_number].number = 0;
 
-    let mut sync_manager_communication_type =
-        context.sync_manager_communication_type[thread_number].clone();
+    let mut sync_manager_communication_type: [u8; size_of::<SyncManagerCommunicationType>()] =
+        context.sync_manager_communication_type[thread_number]
+            .clone()
+            .into();
 
     // Read sync manager communication type object count with complete access
     sdo_read(
@@ -1374,9 +1449,11 @@ pub fn read_pdo_map_complete_access(
         SDO_SMCOMMTYPE,
         0,
         true,
-        <&mut [u8]>::from(&mut sync_manager_communication_type),
+        &mut sync_manager_communication_type,
         TIMEOUT_RX_MAILBOX,
     )?;
+    let sync_manager_communication_type: SyncManagerCommunicationType =
+        sync_manager_communication_type.try_into()?;
 
     // Check whether the result from slave was positive
     if sync_manager_communication_type.number <= 2 {
@@ -1445,6 +1522,7 @@ pub fn read_pdo_map_complete_access(
             &mut *input_size
         } += mapping_size;
     }
+    context.sync_manager_communication_type[thread_number] = sync_manager_communication_type;
 
     if *input_size == 0 && *output_size == 0 {
         Err(CoEError::NoIoFoundInPdoMap)
@@ -1467,7 +1545,7 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
     // Clear pending out mailbox in slave if available with timeout set to 0.
     mailbox_in.receive(context, slave, Duration::default())?;
     let mut mailbox_out = MailboxOut::default();
-    let sdo = <&mut ServiceDataObjectService>::try_from(mailbox_out.as_mut())?;
+    let mut sdo = ServiceDataObjectService::default();
     sdo.mailbox_header.length = host_to_ethercat(8);
     sdo.mailbox_header.address = host_to_ethercat(0);
     sdo.mailbox_header.priority = 0;
@@ -1493,9 +1571,10 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
     sdo.data.as_words_mut()[0] = host_to_ethercat(1);
 
     // Send get object description list request to slave
+    sdo.write_to(&mut mailbox_out).unwrap();
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
-    let a_sdo = <&mut ServiceDataObjectService>::try_from(mailbox_in.as_mut())?;
+    let mut a_sdo;
     let mut first = true;
     let mut sp = 0;
     let mut entries = 0;
@@ -1510,6 +1589,7 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
 
         // Read slave response
         mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
+        a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
 
         // Response should be CANopen over EtherCAT and the get object description list response
         if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
@@ -1613,7 +1693,7 @@ pub fn read_od_description(
     // Clear pending out mailbox in slave if available with timeout set to default.
     mailbox_in.receive(context, slave, Duration::default())?;
     let mut mailbox_out = MailboxOut::default();
-    let sdo = <&mut ServiceDataObjectService>::try_from(mailbox_out.as_mut())?;
+    let mut sdo = ServiceDataObjectService::default();
     sdo.mailbox_header.length = host_to_ethercat(8);
     sdo.mailbox_header.address = host_to_ethercat(0);
     sdo.mailbox_header.priority = 0;
@@ -1641,13 +1721,14 @@ pub fn read_od_description(
     sdo.data.as_words_mut()[0] = host_to_ethercat(od_list.index[item]);
 
     // Send get request to slave
+    sdo.write_to(&mut mailbox_out).unwrap();
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Read slave response
     mailbox_in.clear();
     mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
 
-    let a_sdo = <&mut ServiceDataObjectService>::try_from(mailbox_in.as_mut())?;
+    let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
 
     if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
         && matches!(
@@ -1719,7 +1800,7 @@ pub fn read_oe_single(
     mailbox_in.receive(context, slave, Duration::default())?;
 
     let mut mailbox_out = MailboxOut::default();
-    let sdo = <&mut ServiceDataObjectService>::try_from(mailbox_out.as_mut())?;
+    let mut sdo = ServiceDataObjectService::default();
     sdo.mailbox_header.length = host_to_ethercat(0xA);
     sdo.mailbox_header.address = host_to_ethercat(0);
     sdo.mailbox_header.priority = 0;
@@ -1746,12 +1827,13 @@ pub fn read_oe_single(
     sdo.data.as_bytes_mut()[3] = 1 + 2 + 4;
 
     // Send get object entry description request to slave
+    sdo.write_to(&mut mailbox_out).unwrap();
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Read slave response
     mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
 
-    let a_sdo = <&mut ServiceDataObjectService>::try_from(mailbox_in.as_mut())?;
+    let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
 
     if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
         && matches!(

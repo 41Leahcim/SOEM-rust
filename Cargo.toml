@@ -8,6 +8,7 @@ edition = "2021"
 #ec_ver1 = []
 
 [dependencies]
+bytemuck = "1.19.0"
 heapless = "0.8"
 libc = "0.2.159"
 num-traits = "0.2.19"

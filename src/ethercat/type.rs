@@ -1,9 +1,9 @@
-use core::slice;
 use std::{
     array,
     time::{Duration, SystemTime},
 };
 
+use bytemuck::{AnyBitPattern, NoUninit, Zeroable};
 use num_traits::PrimInt;
 
 use crate::oshw::htons;
@@ -107,6 +107,7 @@ pub enum EthernetHeaderError {
 }
 
 /// Ethernet header defenition
+#[derive(Debug, Clone, Copy)]
 pub struct EthernetHeader {
     /// Destination MAC
     pub destination_address: [u16; 3],
@@ -152,47 +153,24 @@ impl TryFrom<&[u8]> for EthernetHeader {
     }
 }
 
-impl TryFrom<&[u8]> for &EthernetHeader {
-    type Error = EthernetHeaderError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            return Err(EthernetHeaderError::WrongSize);
-        }
-        Ok(unsafe { &slice::from_raw_parts((value as *const [u8]).cast(), 1)[0] })
-    }
-}
-
-impl TryFrom<&mut [u8]> for &mut EthernetHeader {
-    type Error = EthernetHeaderError;
-
-    fn try_from(value: &mut [u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            return Err(EthernetHeaderError::WrongSize);
-        }
-        Ok(unsafe { &mut slice::from_raw_parts_mut((value as *mut [u8]).cast(), 1)[0] })
-    }
-}
+#[allow(unsafe_code)]
+unsafe impl NoUninit for EthernetHeader {}
 
 impl AsRef<[u8]> for EthernetHeader {
     fn as_ref(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(
-                (self as *const EthernetHeader).cast(),
-                size_of::<EthernetHeader>(),
-            )
-        }
+        bytemuck::bytes_of(self)
     }
 }
 
+#[allow(unsafe_code)]
+unsafe impl Zeroable for EthernetHeader {}
+
+#[allow(unsafe_code)]
+unsafe impl AnyBitPattern for EthernetHeader {}
+
 impl AsMut<[u8]> for EthernetHeader {
     fn as_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            slice::from_raw_parts_mut(
-                (self as *mut EthernetHeader).cast(),
-                size_of::<EthernetHeader>(),
-            )
-        }
+        bytemuck::bytes_of_mut(self)
     }
 }
 
@@ -201,10 +179,18 @@ pub const ETHERNET_HEADER_SIZE: usize = size_of::<EthernetHeader>();
 
 #[derive(Debug)]
 pub enum EthercatHeaderError {
-    WrongSize,
+    WrongSize(usize),
+    InvalidCommandType(InvalidCommandType),
+}
+
+impl From<InvalidCommandType> for EthercatHeaderError {
+    fn from(value: InvalidCommandType) -> Self {
+        Self::InvalidCommandType(value)
+    }
 }
 
 /// EtherCat datagram header defenition
+#[derive(Debug, Clone, Copy)]
 pub struct EthercatHeader {
     /// Length of etherCAT datagram
     pub ethercat_length: u16,
@@ -226,47 +212,32 @@ pub struct EthercatHeader {
     pub interrupt: u16,
 }
 
-impl TryFrom<&[u8]> for &EthercatHeader {
+impl TryFrom<&[u8]> for EthercatHeader {
     type Error = EthercatHeaderError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() < size_of::<Self>() {
-            return Err(EthercatHeaderError::WrongSize);
+            return Err(EthercatHeaderError::WrongSize(value.len()));
         }
-        Ok(unsafe { &slice::from_raw_parts((value as *const [u8]).cast(), 1)[0] })
+        let command = CommandType::try_from(value[2])?;
+        Ok(Self {
+            ethercat_length: u16::from_ne_bytes(value[..2].try_into().unwrap()),
+            command,
+            index: value[3],
+            address_position: u16::from_ne_bytes(value[4..6].try_into().unwrap()),
+            address_offset: u16::from_ne_bytes(value[6..8].try_into().unwrap()),
+            data_length: u16::from_ne_bytes(value[8..10].try_into().unwrap()),
+            interrupt: u16::from_ne_bytes(value[10..12].try_into().unwrap()),
+        })
     }
 }
 
-impl TryFrom<&mut [u8]> for &mut EthercatHeader {
-    type Error = EthercatHeaderError;
-
-    fn try_from(value: &mut [u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            return Err(EthercatHeaderError::WrongSize);
-        }
-        Ok(unsafe { &mut slice::from_raw_parts_mut((value as *mut [u8]).cast(), 1)[0] })
-    }
-}
+#[allow(unsafe_code)]
+unsafe impl NoUninit for EthercatHeader {}
 
 impl AsRef<[u8]> for EthercatHeader {
     fn as_ref(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(
-                (self as *const EthercatHeader).cast(),
-                size_of::<EthercatHeader>(),
-            )
-        }
-    }
-}
-
-impl AsMut<[u8]> for EthercatHeader {
-    fn as_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            slice::from_raw_parts_mut(
-                (self as *mut EthercatHeader).cast(),
-                size_of::<EthercatHeader>(),
-            )
-        }
+        bytemuck::bytes_of(self)
     }
 }
 
@@ -401,6 +372,9 @@ impl TryFrom<u8> for Datatype {
     }
 }
 
+#[derive(Debug)]
+pub struct InvalidCommandType(u8);
+
 /// Ethernet command types
 #[derive(Debug, Clone, Copy)]
 pub enum CommandType {
@@ -468,6 +442,31 @@ impl From<CommandType> for u8 {
             CommandType::LogicalReadWrite => 12,
             CommandType::AutoReadMultipleWrite => 13,
             CommandType::FixedReadMultipleWrite => 14,
+        }
+    }
+}
+
+impl TryFrom<u8> for CommandType {
+    type Error = InvalidCommandType;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(CommandType::Nop),
+            1 => Ok(CommandType::AutoPointerRead),
+            2 => Ok(CommandType::AutoPointerWrite),
+            3 => Ok(CommandType::AutoPointerReadWrite),
+            4 => Ok(CommandType::FixedPointerRead),
+            5 => Ok(CommandType::FixedPointerWrite),
+            6 => Ok(CommandType::FixedPointerReadWrite),
+            7 => Ok(CommandType::BroadcastRead),
+            8 => Ok(CommandType::BroadcastWrite),
+            9 => Ok(CommandType::BroadcastReadWrite),
+            10 => Ok(CommandType::LogicalRead),
+            11 => Ok(CommandType::LogicalWrite),
+            12 => Ok(CommandType::LogicalReadWrite),
+            13 => Ok(CommandType::AutoReadMultipleWrite),
+            14 => Ok(CommandType::FixedReadMultipleWrite),
+            _ => Err(InvalidCommandType(value)),
         }
     }
 }
@@ -710,9 +709,13 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
     }
 }
 
+#[derive(Debug)]
+pub struct InvalidCommand(u8);
+
 /// CANopen over EtherCAT object description command
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum COEObjectDescriptionCommand {
+    #[default]
     ObjectDesciptionListRequest = 1,
     ObjectDesciptionListResponse,
     ObjectDesciptionRequest,
@@ -720,6 +723,29 @@ pub enum COEObjectDescriptionCommand {
     ObjectEntryRequest,
     ObjectEntryResponse,
     ServiceDataObjectInformationError,
+}
+
+impl From<COEObjectDescriptionCommand> for u8 {
+    fn from(value: COEObjectDescriptionCommand) -> Self {
+        value as u8
+    }
+}
+
+impl TryFrom<u8> for COEObjectDescriptionCommand {
+    type Error = InvalidCommand;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::ObjectDesciptionListRequest),
+            2 => Ok(Self::ObjectDesciptionListResponse),
+            3 => Ok(Self::ObjectDesciptionRequest),
+            4 => Ok(Self::ObjectDesciptionResponse),
+            5 => Ok(Self::ObjectEntryRequest),
+            6 => Ok(Self::ObjectEntryResponse),
+            7 => Ok(Self::ServiceDataObjectInformationError),
+            _ => Err(InvalidCommand(value)),
+        }
+    }
 }
 
 impl COEObjectDescriptionCommand {

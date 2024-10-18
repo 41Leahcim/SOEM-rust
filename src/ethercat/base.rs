@@ -121,7 +121,7 @@ pub fn add_datagram(
         )
         .unwrap();
 
-    let mut datagram = <&mut EthercatHeader>::try_from(&mut frame[ETHERNET_HEADER_SIZE..]).unwrap();
+    let mut datagram = EthercatHeader::try_from(&frame[ETHERNET_HEADER_SIZE..]).unwrap();
 
     // Add new datargam to ethernet frame size
     datagram.ethercat_length = host_to_ethercat(
@@ -129,11 +129,10 @@ pub fn add_datagram(
     ) as u16;
     datagram.data_length =
         host_to_ethercat(ethercat_to_host(datagram.data_length) | DATAGRAM_FOLLOWS);
+    frame[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
 
     // Set new EtherCAT header position
-    datagram =
-        <&mut EthercatHeader>::try_from(&mut frame[previous_length - ETHERCAT_LENGTH_SIZE..])
-            .unwrap();
+    datagram = EthercatHeader::try_from(&frame[previous_length - ETHERCAT_LENGTH_SIZE..]).unwrap();
     datagram.command = command;
     datagram.index = index;
     datagram.address_position = host_to_ethercat(address_position);
@@ -145,6 +144,7 @@ pub fn add_datagram(
         // This is the last datagram to add
         data.len() as u16
     });
+    frame[previous_length - ETHERCAT_LENGTH_SIZE..].copy_from_slice(datagram.as_ref());
 
     write_datagram_data(
         &mut frame[previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE..],

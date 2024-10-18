@@ -423,29 +423,32 @@ pub fn out_frame(port: &mut Port, index: usize, stacknumber: i32) -> i32 {
 /// # Returns
 /// Socket send result
 pub fn out_frame_red(port: &mut Port, index: u8) -> Result<i32, NicdrvError> {
-    let mut ehp = <&mut EthernetHeader>::try_from(
-        port.tx_buffers.lock().unwrap()[usize::from(index)].as_mut_slice(),
-    )?;
+    let mut ehp =
+        EthernetHeader::try_from(port.tx_buffers.lock().unwrap()[usize::from(index)].as_slice())?;
 
     // Rewrite MAC source address 1 to primary
     ehp.source_address[1] = htons(PRIMARY_MAC[1]);
+    port.tx_buffers.lock().unwrap()[usize::from(index)]
+        .as_mut_slice()
+        .copy_from_slice(ehp.as_ref());
 
     // Transmit over primary socket
     let rval = out_frame(port, index.into(), 0);
 
     if !matches!(port.redstate, RedundancyMode::None) {
-        ehp = <&mut EthernetHeader>::try_from(port.temp_tx_buffer.lock().unwrap().as_mut_slice())?;
+        let mut tmp_buffer = port.temp_tx_buffer.lock().unwrap();
+        let mut ehp = EthernetHeader::try_from(tmp_buffer.as_slice())?;
 
         // Use dummy frame for secondary socket transmit (BRD)
-        let mut tmp_buffer = port.temp_tx_buffer.lock().unwrap();
-        let datagram_ptr =
-            <&mut EthercatHeader>::try_from(&mut tmp_buffer[ETHERNET_HEADER_SIZE..])?;
+        let mut datagram = EthercatHeader::try_from(&tmp_buffer[ETHERNET_HEADER_SIZE..])?;
 
         // Write index to frame
-        datagram_ptr.index = index;
+        datagram.index = index;
 
         // Rewrite MAC source address 1 to secondary
         ehp.source_address[1] = htons(SECONDARY_MAC[1]);
+        tmp_buffer.copy_from_slice(ehp.as_ref());
+        tmp_buffer[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
 
         // Transmit over secondary socket
         let redport = port.redport.as_ref().unwrap();
@@ -530,19 +533,20 @@ pub fn inframe(port: &mut Port, index: u8, stacknumber: i32) -> Result<u16, Nicd
             BufferState::Complete;
     } else if ecx_receive_packet(port, stacknumber) != 0 {
         rval = Err(EthercatError::OtherFramce);
-        let ehp = <&mut EthernetHeader>::try_from(
+        let ehp = EthernetHeader::try_from(
             get_stack(port, stacknumber)
                 .temp_buf
                 .lock()
                 .unwrap()
-                .as_mut_slice(),
+                .as_slice(),
         )?;
         if ehp.etype == htons(ETH_P_ECAT) {
-            let ecp = <&mut EthercatHeader>::try_from(
-                &mut get_stack(port, stacknumber).temp_buf.lock().unwrap()[ETHERNET_HEADER_SIZE..],
+            let ecp = EthercatHeader::try_from(
+                &get_stack(port, stacknumber).temp_buf.lock().unwrap()[ETHERNET_HEADER_SIZE..],
             )?;
             let l = usize::from(ethercat_to_host(ecp.ethercat_length) & 0x0FFF);
             let index_found = ecp.index;
+
             // Check whether the index is the index we're looking for
             if index_found == index {
                 // Put it in the buffer

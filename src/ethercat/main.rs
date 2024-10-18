@@ -1,10 +1,12 @@
-use core::slice;
 use std::{
     any::Any,
+    array,
+    io::{self, Read, Write},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use bytemuck::{AnyBitPattern, NoUninit, Zeroable};
 use heapless::String as HeaplessString;
 use oshw::nicdrv::{Port, RedPort};
 
@@ -53,6 +55,7 @@ pub struct EcAdapter {
 }
 
 /// Fieldbus Memory Management Unit
+#[derive(Debug, Clone, Copy)]
 pub struct Fmmu {
     pub log_start: u32,
     pub log_length: u16,
@@ -66,9 +69,18 @@ pub struct Fmmu {
     pub unused2: u16,
 }
 
-impl From<&mut Fmmu> for &mut [u8] {
-    fn from(value: &mut Fmmu) -> Self {
-        unsafe { slice::from_raw_parts_mut((value as *mut Fmmu).cast(), size_of::<Fmmu>()) }
+#[allow(unsafe_code)]
+unsafe impl NoUninit for Fmmu {}
+
+#[allow(unsafe_code)]
+unsafe impl Zeroable for Fmmu {}
+
+#[allow(unsafe_code)]
+unsafe impl AnyBitPattern for Fmmu {}
+
+impl<'fmmu> From<&'fmmu mut Fmmu> for &'fmmu mut [u8] {
+    fn from(value: &'fmmu mut Fmmu) -> Self {
+        bytemuck::bytes_of_mut(value)
     }
 }
 
@@ -79,11 +91,18 @@ pub struct SyncManager {
     pub sm_flags: u32,
 }
 
-impl From<&mut SyncManager> for &mut [u8] {
-    fn from(value: &mut SyncManager) -> Self {
-        unsafe {
-            slice::from_raw_parts_mut((value as *mut SyncManager).cast(), size_of::<SyncManager>())
-        }
+#[allow(unsafe_code)]
+unsafe impl NoUninit for SyncManager {}
+
+#[allow(unsafe_code)]
+unsafe impl Zeroable for SyncManager {}
+
+#[allow(unsafe_code)]
+unsafe impl AnyBitPattern for SyncManager {}
+
+impl<'sm> From<&'sm mut SyncManager> for &'sm mut [u8] {
+    fn from(value: &'sm mut SyncManager) -> Self {
+        bytemuck::bytes_of_mut(value)
     }
 }
 
@@ -138,8 +157,9 @@ pub const SYNC_MANAGER_ENABLE_MASK: u32 = 0xFFFE_FFFF;
 pub struct InvalidSyncManagerType(u8);
 
 /// Sync manager type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyncManagerType {
+    #[default]
     Unused,
     MailboxWrite,
     MailboxRead,
@@ -476,7 +496,25 @@ impl Default for EepromPdo {
 
 /// Mailbox buffer array
 #[derive(Debug)]
-pub struct MailboxIn([u8; MAX_MAILBOX_SIZE]);
+pub struct MailboxIn {
+    data: [u8; MAX_MAILBOX_SIZE],
+    read_index: usize,
+}
+
+impl Read for MailboxIn {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.read_index <= MAX_MAILBOX_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Mailbox is empty",
+            ));
+        }
+        buf.copy_from_slice(&self.data);
+        let written = buf.len().min(MAX_MAILBOX_SIZE - self.read_index);
+        self.read_index += written;
+        Ok(written)
+    }
+}
 
 impl MailboxIn {
     pub fn empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
@@ -499,24 +537,43 @@ impl MailboxIn {
 
 impl AsRef<[u8]> for MailboxIn {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.data
     }
 }
 
 impl AsMut<[u8]> for MailboxIn {
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.0
+        &mut self.data
     }
 }
 
 impl Default for MailboxIn {
     fn default() -> Self {
-        Self([0; MAX_MAILBOX_SIZE])
+        Self {
+            data: [0; MAX_MAILBOX_SIZE],
+            read_index: 0,
+        }
     }
 }
 
 #[derive(Debug)]
-pub struct MailboxOut([u8; MAX_MAILBOX_SIZE]);
+pub struct MailboxOut {
+    data: [u8; MAX_MAILBOX_SIZE],
+    write_index: usize,
+}
+
+impl Write for MailboxOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.data.as_mut_slice().write(buf)?;
+        self.write_index += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.write_index = 0;
+        Ok(())
+    }
+}
 
 impl MailboxOut {
     pub fn empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
@@ -535,28 +592,63 @@ impl MailboxOut {
 
 impl AsRef<[u8]> for MailboxOut {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.data
     }
 }
 
 impl AsMut<[u8]> for MailboxOut {
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.0
+        &mut self.data
     }
 }
 
 impl Default for MailboxOut {
     fn default() -> Self {
-        Self([0; MAX_MAILBOX_SIZE])
+        Self {
+            data: [0; MAX_MAILBOX_SIZE],
+            write_index: 0,
+        }
     }
 }
 
 /// Standard ethercat mailbox header
+#[derive(Debug, Default)]
 pub struct MailboxHeader {
     pub length: u16,
     pub address: u16,
     pub priority: u8,
     pub mailbox_type: u8,
+}
+
+impl MailboxHeader {
+    pub fn write_to(&self, bytes: &mut impl Write) -> Result<usize, usize> {
+        let mut bytes_written = match bytes.write(&self.length.to_ne_bytes()) {
+            Ok(written) if written < 2 => return Err(written),
+            Ok(written) => written,
+            Err(_) => return Err(0),
+        };
+        match bytes.write(&self.address.to_ne_bytes()) {
+            Ok(written) if written < 2 => return Err(bytes_written + written),
+            Ok(written) => bytes_written += written,
+            Err(_) => return Err(bytes_written),
+        }
+        match bytes.write(&[self.priority, self.mailbox_type]) {
+            Ok(bytes) if bytes < 2 => Err(bytes + bytes_written),
+            Ok(bytes) => Ok(bytes + bytes_written),
+            Err(_) => Err(bytes_written),
+        }
+    }
+
+    pub fn read_from<R: Read>(bytes: &mut R) -> io::Result<Self> {
+        let mut value = [0; 6];
+        bytes.read_exact(&mut value)?;
+        Ok(Self {
+            length: u16::from_ne_bytes(value[..2].try_into().unwrap()),
+            address: u16::from_ne_bytes(value[2..4].try_into().unwrap()),
+            priority: value[4],
+            mailbox_type: value[5],
+        })
+    }
 }
 
 pub struct ApplicationLayerStatus {
@@ -590,66 +682,87 @@ pub struct SyncManagerCommunicationType {
     pub sync_manager_type: [SyncManagerType; MAX_SM as usize],
 }
 
-impl From<&mut SyncManagerCommunicationType> for &mut [u8] {
-    fn from(value: &mut SyncManagerCommunicationType) -> Self {
-        unsafe {
-            slice::from_raw_parts_mut(
-                (value as *mut SyncManagerCommunicationType).cast(),
-                size_of::<SyncManagerCommunicationType>(),
-            )
+impl From<SyncManagerCommunicationType> for [u8; 2 + MAX_SM as usize] {
+    fn from(value: SyncManagerCommunicationType) -> Self {
+        array::from_fn(|i| match i {
+            0 => value.number,
+            1 => value.null,
+            2.. => u8::from(value.sync_manager_type[i - 2]),
+        })
+    }
+}
+
+impl TryFrom<[u8; 2 + MAX_SM as usize]> for SyncManagerCommunicationType {
+    type Error = InvalidSyncManagerType;
+
+    fn try_from(value: [u8; 2 + MAX_SM as usize]) -> Result<Self, Self::Error> {
+        let mut sync_manager_type = [SyncManagerType::default(); MAX_SM as usize];
+        for i in 0..sync_manager_type.len() {
+            sync_manager_type[i] = SyncManagerType::try_from(value[i + 2])?;
         }
+        Ok(Self {
+            number: value[0],
+            null: value[1],
+            sync_manager_type,
+        })
     }
 }
 
 /// Service data object assign structure for communication access
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PdoAssign {
     pub number: u8,
     pub null: u8,
     pub index: [u16; 256],
 }
 
-impl From<&mut PdoAssign> for &mut [u8] {
-    fn from(value: &mut PdoAssign) -> Self {
-        unsafe {
-            slice::from_raw_parts_mut((value as *mut PdoAssign).cast(), size_of::<PdoAssign>())
-        }
+#[allow(unsafe_code)]
+unsafe impl NoUninit for PdoAssign {}
+
+#[allow(unsafe_code)]
+unsafe impl Zeroable for PdoAssign {}
+
+#[allow(unsafe_code)]
+unsafe impl AnyBitPattern for PdoAssign {}
+
+impl<'pdo> From<&'pdo mut PdoAssign> for &'pdo mut [u8] {
+    fn from(value: &'pdo mut PdoAssign) -> Self {
+        bytemuck::bytes_of_mut(value)
     }
 }
 
-impl From<&PdoAssign> for &[u8] {
-    fn from(value: &PdoAssign) -> Self {
-        unsafe { slice::from_raw_parts((value as *const PdoAssign).cast(), size_of::<PdoAssign>()) }
+impl<'pdo> From<&'pdo PdoAssign> for &'pdo [u8] {
+    fn from(value: &'pdo PdoAssign) -> Self {
+        bytemuck::bytes_of(value)
     }
 }
 
 /// Service data object assign structure for communication access
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PdoDescription {
     pub number: u8,
     pub null: u8,
     pub pdo: [u32; 256],
 }
 
-impl From<&mut PdoDescription> for &mut [u8] {
-    fn from(value: &mut PdoDescription) -> Self {
-        unsafe {
-            slice::from_raw_parts_mut(
-                (value as *mut PdoDescription).cast(),
-                size_of::<PdoAssign>(),
-            )
-        }
+#[allow(unsafe_code)]
+unsafe impl NoUninit for PdoDescription {}
+
+#[allow(unsafe_code)]
+unsafe impl Zeroable for PdoDescription {}
+
+#[allow(unsafe_code)]
+unsafe impl AnyBitPattern for PdoDescription {}
+
+impl<'pdo> From<&'pdo mut PdoDescription> for &'pdo mut [u8] {
+    fn from(value: &'pdo mut PdoDescription) -> Self {
+        bytemuck::bytes_of_mut(value)
     }
 }
 
-impl From<&PdoDescription> for &[u8] {
-    fn from(value: &PdoDescription) -> Self {
-        unsafe {
-            slice::from_raw_parts(
-                (value as *const PdoDescription).cast(),
-                size_of::<PdoAssign>(),
-            )
-        }
+impl<'pdo> From<&'pdo PdoDescription> for &'pdo [u8] {
+    fn from(value: &'pdo PdoDescription) -> Self {
+        bytemuck::bytes_of(value)
     }
 }
 

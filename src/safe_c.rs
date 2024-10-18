@@ -113,8 +113,9 @@ pub enum IoctlError {
 
 #[macro_export]
 macro_rules! ioctl {
-    ($fd: expr, $op: expr, ($($x:expr),+ $(,)?)) => {
-        if unsafe{libc::ioctl($fd, $op, $($x),+)} != -1{
+    ($fd: expr, $op: expr, ($($x:expr),+ $(,)?)) => {{
+        #[allow(clippy::macro_metavars_in_unsafe, unsafe_code)]
+        let value = if unsafe{libc::ioctl($fd, $op, $($x),+)} != -1{
             Ok(())
         }else{
             use $crate::safe_c::IoctlError;
@@ -125,8 +126,9 @@ macro_rules! ioctl {
                 libc::ENOTTY => IoctlError::NotTy,
                 _ => IoctlError::InvalidError
             })
-        }
-    };
+        };
+        value
+    }};
 }
 
 #[derive(Debug)]
