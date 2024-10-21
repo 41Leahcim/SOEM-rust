@@ -1,3 +1,11 @@
+//! Main EtherCAT functions.
+//!
+//! Initializartion, state set and read, mailbox primitives, EEPROM primitives,
+//! SII reading and processdata exchange.
+//!
+//! Defines ec_slave[]. All slave information is put in this structure.
+//! Needed for most user interaction with slaves.
+
 use std::{
     any::Any,
     array,

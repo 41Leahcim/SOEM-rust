@@ -1,3 +1,5 @@
+//! Parent module for low level operations.
+
 use std::{ffi::CStr, str::FromStr};
 
 use libc::if_nameindex;

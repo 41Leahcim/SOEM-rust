@@ -1,3 +1,7 @@
+//! CAT over EtherCAT module.
+//!
+//! SDO read/write and SDO service functions.
+
 use core::str;
 use std::array;
 use std::io;

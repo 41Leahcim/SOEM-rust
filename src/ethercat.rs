@@ -1,3 +1,5 @@
+//! Parent module for all EtherCAT modules
+
 pub mod base;
 pub mod coe;
 pub mod config;

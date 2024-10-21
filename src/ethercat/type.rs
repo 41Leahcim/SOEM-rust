@@ -1,3 +1,12 @@
+//! General types and constants for EtherCAT.
+//!
+//! Constants that could need optimization for specific applications
+//! are the `EC_TIMEOUTxxx`. Assumptions for the standard settings are a
+//! standard Linux PC or laptop and a wired connection maximal 100 slaves.
+//! For use with wireless connections or lots of slaves, the timeouts need
+//! increasing. For fast systems running Xenomai and RT-net or alike the
+//! timeouts need to be shorter.
+
 use std::{
     array,
     time::{Duration, SystemTime},
@@ -862,6 +871,7 @@ pub enum EthercatRegister {
     DistributedClockTimeFilter = 0x934,
     DistributedClockControlUnit = 0x980,
     DistributedClockSynchronizationActive = 0x981,
+    DistributedClockStart0 = 0x990,
     DistributedClockCycle0 = 0x9A0,
     DistributedClockCycle1 = 0x9A4,
 }
@@ -919,6 +929,7 @@ impl From<EthercatRegister> for u16 {
             EthercatRegister::DistributedClockTimeFilter => 0x934,
             EthercatRegister::DistributedClockControlUnit => 0x980,
             EthercatRegister::DistributedClockSynchronizationActive => 0x981,
+            EthercatRegister::DistributedClockStart0 => 0x990,
             EthercatRegister::DistributedClockCycle0 => 0x9A0,
             EthercatRegister::DistributedClockCycle1 => 0x9A4,
         }

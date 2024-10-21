@@ -1,3 +1,5 @@
+//! Module for debugging and time measurement.
+
 use std::time::{Duration, SystemTime};
 
 pub struct OsalTimer {

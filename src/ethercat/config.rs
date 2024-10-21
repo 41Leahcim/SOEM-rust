@@ -1,3 +1,8 @@
+//! Configuration module for EtherCAT master.
+//!
+//! After successfull initialization with `init()` or `init_redundant()`
+//! the slaves can be auto configured with this module.
+
 use std::{fmt::Write, time::Duration};
 
 use super::{
@@ -1607,9 +1612,9 @@ fn main_config_map_group<'context, 'io_map: 'context>(
 /// in sequential order (legacy soem way).
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `io_map`: IOmap
-/// `group`: Group to map, 0 is all groups
+/// - `context`: Context struct
+/// - `io_map`: IOmap
+/// - `group`: Group to map, 0 is all groups
 ///
 /// # Returns
 /// IOmap size or error
@@ -1625,9 +1630,9 @@ pub fn config_map_group<'context, 'io_map: 'context>(
 /// in sequential order (legacy SOEM way) and force byte alignment
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `io_map`: IOmap
-/// `group`: Group to map, 0 = all groups
+/// - `context`: Context struct
+/// - `io_map`: IOmap
+/// - `group`: Group to map, 0 = all groups
 ///
 /// # Returns
 /// IOmap size or error
@@ -1643,9 +1648,9 @@ pub fn config_map_group_aligned<'context, 'io_map: 'context>(
 /// overlapping. NOTE: Must use this for TI ESC when using LRW.
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `io_map`: Pointer to IOmap
-/// `group`: Group to map, 0 = all groups
+/// - `context`: Context struct
+/// - `io_map`: Pointer to IOmap
+/// - `group`: Group to map, 0 = all groups
 ///
 /// # Returns
 /// IOmap size or error
@@ -1804,9 +1809,9 @@ pub fn config_overlap_map_group<'context, 'io_map: 'context>(
 /// Recover slave
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave to recover
-/// `timeout`: local timeout f.e. `TIMEOUT_RETURN3`
+/// - `context`: Context struct
+/// - `slave`: Slave to recover
+/// - `timeout`: local timeout f.e. `TIMEOUT_RETURN3`
 ///
 /// # Returns
 /// `Ok(())` or Error
@@ -1918,9 +1923,9 @@ pub fn recover_slave(
 /// Reconfigure slave
 ///
 /// # Parameters
-/// `context`: Context struct
-/// `slave`: Slave to reconfigure
-/// `timeout`: Local timeout f.e. `TIMEOUT_RETURN3`
+/// - `context`: Context struct
+/// - `slave`: Slave to reconfigure
+/// - `timeout`: Local timeout f.e. `TIMEOUT_RETURN3`
 ///
 /// # Returns
 /// slave state or error

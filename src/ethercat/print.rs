@@ -1,3 +1,9 @@
+//! Module to convert EtherCAT errors to readable messages.
+//!
+//! SDO abort messages and AL status codes are used to relay slave errors to
+//! the user application. This module converts the binary codes to readable text.
+//! For the defined error codes see the EtherCAT protocol documentation.
+
 use super::{main::Context, r#type::Error};
 
 pub fn sdo_error_to_string(sdo_error_code: u32) -> String {

@@ -1,3 +1,7 @@
+//! Safer abstraction over C function.
+//!
+//! Improves safety by returning an error on failure and limiting the possible arguments.
+
 use std::ptr::NonNull;
 
 use libc::{

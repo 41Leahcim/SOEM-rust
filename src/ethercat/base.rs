@@ -1,3 +1,9 @@
+//! Setting up a datagram in an ethernet frame.
+//! EtherCAT datagram primitives, broadcast, auto increment, configured and
+//! logical adddressed data transfers. All base transfers are blocking, so
+//! wait for the frame to be returned to the master or timeout. If this is
+//! not acceptable, build your own datagrams and use the functions from nicdrv.rs
+
 use std::time::Duration;
 
 use crate::{

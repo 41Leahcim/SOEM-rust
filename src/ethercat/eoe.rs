@@ -1,3 +1,9 @@
+//! Ethernet over EtherCAT (EoE) module.
+//!
+//! Set/Get IP functions.
+//! Blocking send/receive Ethernet frame
+//! Read incoming EoE fragment to ethernet frame
+
 use std::{any::Any, net::Ipv4Addr, task::Context, time::Duration};
 
 use num_traits::PrimInt;

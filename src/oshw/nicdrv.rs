@@ -1,3 +1,27 @@
+//! EtherCAT RAW socket driver
+//!
+//! Low level interface functions to send and receive EtherCAT packets.
+//! EtherCAT has the property that packets are only send by the master,
+//! and the send packets always return in the receive buffer.
+//! There can be multiple packets "on the wire" before they return.
+//! To combine the received packets with the original send packets, a buffer
+//! system is installed. The identifier is put in the index item of the
+//! EtherCAT header. The index is stored and compared when a frame is received.
+//! If there is a match, the packet can be combined with the transmit packet
+//! and returned to the higher level function.
+//!
+//! The socket layer can exhibit a reversal in the packet orde (rare).
+//! If the TX order is A-B-C, the return order could be A-C-B. The indexed buffer
+//! will reorder the packets automaticaly.
+//!
+//! The "redundant" option will configure 2 sockets and 2 NIC interfaces.
+//! Slaves are connected to both interfaces, 1 on the IN port and 1 on the OUT port.
+//! Packets are send via both interfaces. Any one of the connections (also an
+//! interconect) can be removed and the slaves are still serviced with packets.
+//! The software layer will detect the possible failure modes and compensatte.
+//! If needed, the packets from interface A are resent through interface B.
+//! This layer is fully transparent from the highest layers.
+
 use std::{
     array,
     mem::zeroed,

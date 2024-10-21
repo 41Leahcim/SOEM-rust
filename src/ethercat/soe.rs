@@ -1,3 +1,5 @@
+//! Servo over EtherCAT (SoE) module
+
 use std::{any::Any, time::Duration};
 
 use super::main::Context;
