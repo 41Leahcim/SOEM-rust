@@ -279,6 +279,18 @@ pub enum EthercatState {
     Error = 0x10,
 }
 
+impl From<EthercatState> for u8 {
+    fn from(value: EthercatState) -> Self {
+        value as u8
+    }
+}
+
+impl From<EthercatState> for u16 {
+    fn from(value: EthercatState) -> Self {
+        u16::from(u8::from(value))
+    }
+}
+
 /// Possible buffer states
 #[derive(Debug, Clone, Copy)]
 pub enum BufferState {
@@ -372,6 +384,7 @@ impl TryFrom<u8> for Datatype {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct InvalidCommandType(u8);
 
@@ -545,6 +558,18 @@ pub enum SiiGeneralItem {
     MailboxProtocol = 0x1C,
 }
 
+impl From<SiiGeneralItem> for u8 {
+    fn from(value: SiiGeneralItem) -> Self {
+        value as u8
+    }
+}
+
+impl From<SiiGeneralItem> for u16 {
+    fn from(value: SiiGeneralItem) -> Self {
+        u16::from(u8::from(value))
+    }
+}
+
 #[derive(Debug)]
 pub enum MailboxError {
     InvalidMailboxType(u8),
@@ -709,6 +734,7 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct InvalidCommand(u8);
 

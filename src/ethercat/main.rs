@@ -229,7 +229,7 @@ pub struct Slave<'slave> {
     pub output_bytes: u16,
 
     /// Output IOmap buffer
-    pub outputs: Vec<u8>,
+    pub outputs: &'slave [u8],
 
     /// Startbit in first output byte
     pub output_startbit: u8,
@@ -376,7 +376,7 @@ pub struct Slave<'slave> {
 
 ///EtherCAT slave group
 #[derive(Debug)]
-pub struct SlaveGroup {
+pub struct SlaveGroup<'io_map> {
     /// Logical start address for this group
     pub logical_start_address: u32,
 
@@ -384,13 +384,13 @@ pub struct SlaveGroup {
     pub output_bytes: u32,
 
     /// Output IOmap buffer
-    pub outputs: Vec<u8>,
+    pub outputs: &'io_map [u8],
 
     /// Input bytes, 0 if input bits < 8
     pub input_bytes: u32,
 
     /// Input IOmap buffer
-    pub inputs: Vec<u8>,
+    pub inputs: &'io_map [u8],
 
     /// Has DC capability
     pub has_dc: bool,
@@ -399,7 +399,7 @@ pub struct SlaveGroup {
     pub dc_next: u16,
 
     /// E-bus current
-    pub ebus_current: i16,
+    pub ebus_current: u16,
 
     /// If >0 block use of logical read write in process data
     pub block_logical_read_write: u8,
@@ -408,6 +408,7 @@ pub struct SlaveGroup {
     pub used_segment_count: u16,
 
     pub first_input_segment: u16,
+    pub input_offset: u16,
 
     /// Expected workcounter outputs
     pub work_counter_outputs: u16,
@@ -421,20 +422,22 @@ pub struct SlaveGroup {
     pub io_segments: [u32; MAX_IO_SEGMENTS],
 }
 
-impl Default for SlaveGroup {
+impl<'io_map> Default for SlaveGroup<'io_map> {
     fn default() -> Self {
+        const STATIC_SLICE: &[u8] = &[];
         Self {
             logical_start_address: 0,
             output_bytes: 0,
-            outputs: Vec::new(),
+            outputs: STATIC_SLICE,
             input_bytes: 0,
-            inputs: Vec::new(),
+            inputs: STATIC_SLICE,
             has_dc: false,
             dc_next: 0,
             ebus_current: 0,
             block_logical_read_write: 0,
             used_segment_count: 0,
             first_input_segment: 0,
+            input_offset: 0,
             work_counter_outputs: 0,
             work_counter_inputs: 0,
             check_slaves_states: false,
@@ -779,7 +782,7 @@ pub struct Context<'context> {
     /// Maximum nummber of slaves allowed in slavelist
     pub max_slaves: u16,
 
-    pub grouplist: Vec<SlaveGroup>,
+    pub grouplist: Vec<SlaveGroup<'context>>,
 
     /// Maximum number of groups allowed in grouplist
     pub max_group: u32,
@@ -828,7 +831,7 @@ pub struct Context<'context> {
         fn(context: &mut Context, slave: u16, ecembx: &mut dyn Any) -> i32,
 
     /// Flag to control legacy automatic state change or manual state change
-    pub manual_state_change: i32,
+    pub manual_state_change: bool,
 
     /// Userdata promotes application configuration especially in EC_VER2 with multiple ec_context
     /// instances.
