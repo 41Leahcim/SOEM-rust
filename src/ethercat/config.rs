@@ -163,7 +163,7 @@ fn set_slaves_to_default(context: &mut Context) -> Result<(), NicdrvError> {
         TIMEOUT_RET3,
     )?;
 
-    let mut word = host_to_ethercat(4_u16).into_inner().to_ne_bytes();
+    let mut word = host_to_ethercat(4_u16).to_bytes();
 
     // Set interrupt mask
     bwr(
@@ -221,7 +221,7 @@ fn set_slaves_to_default(context: &mut Context) -> Result<(), NicdrvError> {
     )?;
 
     // Digital Clock speedstart
-    word = host_to_ethercat(0x1000u16).into_inner().to_ne_bytes();
+    word = host_to_ethercat(0x1000u16).to_bytes();
     bwr(
         port,
         0,
@@ -231,7 +231,7 @@ fn set_slaves_to_default(context: &mut Context) -> Result<(), NicdrvError> {
     )?;
 
     // Digital clock filter expression
-    word = host_to_ethercat(0xC00u16).into_inner().to_ne_bytes();
+    word = host_to_ethercat(0xC00u16).to_bytes();
     bwr(
         port,
         0,
@@ -723,7 +723,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             let slave_object = &mut context.slavelist[slave_usize];
 
             // Should never happen
-            if slave_object.sync_manager[0].start_address.into_inner() == 0 {
+            if slave_object.sync_manager[0].start_address.is_zero() {
                 ec_println!("Slave {slave} has no proper mailbox in configuration, try default.");
                 slave_object.sync_manager[0].start_address = host_to_ethercat(0x1000);
                 slave_object.sync_manager[0].sm_length = host_to_ethercat(0x80);
@@ -732,7 +732,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             }
 
             // Should never happen
-            if slave_object.sync_manager[1].start_address.into_inner() == 0 {
+            if slave_object.sync_manager[1].start_address.is_zero() {
                 ec_println!("Slave {slave} has no proper mailbox out configuration, try default.");
                 slave_object.sync_manager[1].start_address = host_to_ethercat(0x1080);
                 slave_object.sync_manager[1].sm_length = host_to_ethercat(0x80);
@@ -947,8 +947,7 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
     if context.slavelist[slave_usize].mailbox_length == 0
         && context.slavelist[slave_usize].sync_manager[0]
             .start_address
-            .into_inner()
-            != 0
+            .is_zero()
     {
         fpwr(
             &mut context.port.lock().unwrap(),
@@ -965,10 +964,9 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
         );
     }
     if !context.slavelist[slave_usize].mailbox_length == 0
-        && context.slavelist[slave_usize].sync_manager[1]
+        && !context.slavelist[slave_usize].sync_manager[1]
             .start_address
-            .into_inner()
-            != 0
+            .is_zero()
     {
         fpwr(
             &mut context.port.lock().unwrap(),
@@ -987,17 +985,15 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
 
     // Program SM2 to SMx
     for sm_index in 2..usize::from(MAX_SM) {
-        if context.slavelist[slave_usize].sync_manager[sm_index]
+        if !context.slavelist[slave_usize].sync_manager[sm_index]
             .start_address
-            .into_inner()
-            != 0
+            .is_zero()
         {
             // Check if SM length is zero -> clear enable flag
             context.slavelist[slave_usize].sync_manager[sm_index].sm_flags =
                 if context.slavelist[slave_usize].sync_manager[sm_index]
                     .sm_length
-                    .into_inner()
-                    == 0
+                    .is_zero()
                 {
                     host_to_ethercat(
                         ethercat_to_host(
@@ -1195,10 +1191,9 @@ pub fn config_create_input_mappings<'a, 'b: 'a>(
         }
 
         fmmu_done += fmmu_size;
-        if context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)]
+        if !context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)]
             .log_length
-            .into_inner()
-            != 0
+            .is_zero()
         {
             let fmmu_count_usize = usize::from(fmmu_count);
             context.slavelist[slave_usize].fmmu[fmmu_count_usize].physical_start_bit = 0;
@@ -1374,10 +1369,9 @@ fn config_create_output_mappings<'a, 'b: 'a>(
         }
         fmmu_done += fmmu_size;
 
-        if context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)]
+        if !context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)]
             .log_length
-            .into_inner()
-            != 0
+            .is_zero()
         {
             context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)].physical_start_bit = 0;
             context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)].fmmu_type = 2;
@@ -1973,10 +1967,9 @@ pub fn reconfig_slave(
     if state == EthercatState::Init.into() {
         // Program all enabled Sync Managers
         for sm_index in 0..MAX_SM {
-            if context.slavelist[slave_usize].sync_manager[usize::from(sm_index)]
+            if !context.slavelist[slave_usize].sync_manager[usize::from(sm_index)]
                 .start_address
-                .into_inner()
-                != 0
+                .is_zero()
             {
                 fpwr(
                     &mut context.port.lock().unwrap(),

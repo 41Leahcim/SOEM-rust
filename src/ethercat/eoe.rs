@@ -356,7 +356,7 @@ impl EthernetOverEthercat {
             .mailbox_header
             .write_to(writer)
             .map_err(EthernetOverEthercatWriteError::FailedToWriteCompletely)?;
-        match writer.write(&self.frame_info1.into_inner().to_ne_bytes()) {
+        match writer.write(&self.frame_info1.to_bytes()) {
             Err(err) => return Err(err.into()),
             Ok(bytes) if bytes < 2 => {
                 return Err(EthernetOverEthercatWriteError::FailedToWriteCompletely(
@@ -365,7 +365,7 @@ impl EthernetOverEthercat {
             }
             Ok(bytes) => written += bytes,
         }
-        match writer.write(&self.info_result.inner().into_inner().to_ne_bytes()) {
+        match writer.write(&self.info_result.inner().to_bytes()) {
             Err(err) => return Err(err.into()),
             Ok(bytes) if bytes < 2 => {
                 return Err(EthernetOverEthercatWriteError::FailedToWriteCompletely(

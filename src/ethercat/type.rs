@@ -1054,6 +1054,34 @@ impl<Int: PrimInt> Ethercat<Int> {
     pub fn into_inner(self) -> Int {
         self.0
     }
+
+    pub fn is_zero(self) -> bool {
+        self.0.is_zero()
+    }
+}
+
+impl Ethercat<u16> {
+    pub fn to_bytes(self) -> [u8; 2] {
+        self.0.to_ne_bytes()
+    }
+}
+
+impl Ethercat<u32> {
+    pub fn to_bytes(self) -> [u8; 4] {
+        self.0.to_ne_bytes()
+    }
+}
+
+impl Ethercat<i32> {
+    pub fn to_bytes(self) -> [u8; 4] {
+        self.0.to_ne_bytes()
+    }
+}
+
+impl Ethercat<i64> {
+    pub fn to_bytes(self) -> [u8; 8] {
+        self.0.to_ne_bytes()
+    }
 }
 
 pub fn host_to_ethercat<Int: PrimInt>(value: Int) -> Ethercat<Int> {

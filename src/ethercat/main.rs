@@ -634,12 +634,12 @@ pub struct MailboxHeader {
 
 impl MailboxHeader {
     pub fn write_to(&self, bytes: &mut impl Write) -> Result<usize, usize> {
-        let mut bytes_written = match bytes.write(&self.length.into_inner().to_ne_bytes()) {
+        let mut bytes_written = match bytes.write(&self.length.to_bytes()) {
             Ok(written) if written < 2 => return Err(written),
             Ok(written) => written,
             Err(_) => return Err(0),
         };
-        match bytes.write(&self.address.into_inner().to_ne_bytes()) {
+        match bytes.write(&self.address.to_bytes()) {
             Ok(written) if written < 2 => return Err(bytes_written + written),
             Ok(written) => bytes_written += written,
             Err(_) => return Err(bytes_written),

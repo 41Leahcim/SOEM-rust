@@ -91,7 +91,7 @@ pub fn dsync0(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockStart0.into(),
-        &mut time.into_inner().to_ne_bytes(),
+        &mut time.to_bytes(),
         TIMEOUT_RETURN,
     )?;
 
@@ -101,7 +101,7 @@ pub fn dsync0(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockCycle0.into(),
-        &mut time_cycle.into_inner().to_ne_bytes(),
+        &mut time_cycle.to_bytes(),
         TIMEOUT_RETURN,
     )?;
 
@@ -207,7 +207,7 @@ pub fn dsync01(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockStart0.into(),
-        &mut time.into_inner().to_ne_bytes(),
+        &mut time.to_bytes(),
         TIMEOUT_RETURN,
     )?;
 
@@ -217,7 +217,7 @@ pub fn dsync01(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockCycle0.into(),
-        &mut time_cycle.into_inner().to_ne_bytes(),
+        &mut time_cycle.to_bytes(),
         TIMEOUT_RETURN,
     )?;
 
@@ -226,7 +226,7 @@ pub fn dsync01(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockCycle1.into(),
-        &mut time_cycle.into_inner().to_ne_bytes(),
+        &mut time_cycle.to_bytes(),
         TIMEOUT_RETURN,
     )?;
     fpwr(
@@ -406,7 +406,7 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
                 &mut context.port.lock().unwrap(),
                 slave_address,
                 EthercatRegister::DistributedClockSystemOffset.into(),
-                &mut hrt.into_inner().to_ne_bytes(),
+                &mut hrt.to_bytes(),
                 TIMEOUT_RETURN,
             )?;
             fprd(
@@ -548,7 +548,7 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
                     &mut context.port.lock().unwrap(),
                     slave_address,
                     EthercatRegister::DistributedClockSystemDelay.into(),
-                    &mut ht.into_inner().to_ne_bytes(),
+                    &mut ht.to_bytes(),
                     TIMEOUT_RETURN,
                 )?;
             }

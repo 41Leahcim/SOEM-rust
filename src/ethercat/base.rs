@@ -503,7 +503,7 @@ pub fn apwrw(
         port,
         address_position,
         address_offset as u16,
-        &mut data.into_inner().to_ne_bytes(),
+        &mut data.to_bytes(),
         timeout,
     )
 }
@@ -557,7 +557,7 @@ pub fn fpwrw(
         port,
         address_position,
         address_offset as u16,
-        &mut data.into_inner().to_ne_bytes(),
+        &mut data.to_bytes(),
         timeout,
     )
 }
@@ -684,7 +684,7 @@ pub fn lrwdc(
             false,
             distributed_clock_reference_slave,
             EthercatRegister::DistributedClockSystemTime.into(),
-            &mut distributed_clock_to_ethercat.into_inner().to_ne_bytes(),
+            &mut distributed_clock_to_ethercat.to_bytes(),
         )
     };
 
