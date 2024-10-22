@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use bytemuck::{AnyBitPattern, NoUninit, Zeroable};
+use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use num_traits::PrimInt;
 
 use crate::oshw::htons;
@@ -202,7 +202,7 @@ impl From<InvalidCommandType> for EthercatHeaderError {
 #[derive(Debug, Clone, Copy)]
 pub struct EthercatHeader {
     /// Length of etherCAT datagram
-    pub ethercat_length: u16,
+    pub ethercat_length: Ethercat<u16>,
 
     /// EtherCAT command
     pub command: CommandType,
@@ -211,11 +211,11 @@ pub struct EthercatHeader {
     pub index: u8,
 
     /// EtherCAT address
-    pub address_position: u16,
-    pub address_offset: u16,
+    pub address_position: Ethercat<u16>,
+    pub address_offset: Ethercat<u16>,
 
     /// Length of data position in datagram
-    pub data_length: u16,
+    pub data_length: Ethercat<u16>,
 
     /// Interrupt, currently unused
     pub interrupt: u16,
@@ -230,12 +230,14 @@ impl TryFrom<&[u8]> for EthercatHeader {
         }
         let command = CommandType::try_from(value[2])?;
         Ok(Self {
-            ethercat_length: u16::from_ne_bytes(value[..2].try_into().unwrap()),
+            ethercat_length: Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap())),
             command,
             index: value[3],
-            address_position: u16::from_ne_bytes(value[4..6].try_into().unwrap()),
-            address_offset: u16::from_ne_bytes(value[6..8].try_into().unwrap()),
-            data_length: u16::from_ne_bytes(value[8..10].try_into().unwrap()),
+            address_position: Ethercat::from_raw(u16::from_ne_bytes(
+                value[4..6].try_into().unwrap(),
+            )),
+            address_offset: Ethercat::from_raw(u16::from_ne_bytes(value[6..8].try_into().unwrap())),
+            data_length: Ethercat::from_raw(u16::from_ne_bytes(value[8..10].try_into().unwrap())),
             interrupt: u16::from_ne_bytes(value[10..12].try_into().unwrap()),
         })
     }
@@ -1034,14 +1036,34 @@ pub const fn high_word(dword: u32) -> u16 {
     (dword >> 16) as u16
 }
 
-pub fn host_to_ethercat<Int: PrimInt>(value: Int) -> Int {
-    value.to_le()
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// A struct representing a numeric value in EtherCAT format.
+/// This struct makes it harder or even impossible to perform some operations on values
+/// converted to EtherCAT.
+pub struct Ethercat<Int: PrimInt>(Int);
+
+unsafe impl<Int: PrimInt> Zeroable for Ethercat<Int> {}
+
+unsafe impl<Int: PrimInt + 'static> Pod for Ethercat<Int> {}
+
+impl<Int: PrimInt> Ethercat<Int> {
+    pub fn from_raw(value: Int) -> Self {
+        Self(value)
+    }
+
+    pub fn into_inner(self) -> Int {
+        self.0
+    }
 }
 
-pub fn ethercat_to_host<Int: PrimInt>(value: Int) -> Int {
+pub fn host_to_ethercat<Int: PrimInt>(value: Int) -> Ethercat<Int> {
+    Ethercat(value.to_le())
+}
+
+pub fn ethercat_to_host<Int: PrimInt>(value: Ethercat<Int>) -> Int {
     if cfg!(target_endian = "big") {
-        value.to_be()
+        value.0.to_be()
     } else {
-        value
+        value.0
     }
 }

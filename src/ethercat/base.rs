@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::r#type::{
-    high_word, host_to_ethercat, low_word, Buffer, BufferState, CommandType, EthercatHeader,
-    EthercatRegister, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
+    high_word, host_to_ethercat, low_word, Buffer, BufferState, CommandType, Ethercat,
+    EthercatHeader, EthercatRegister, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
     ETHERCAT_WORK_COUNTER_SIZE, ETHERNET_HEADER_SIZE,
 };
 
@@ -68,13 +68,13 @@ pub fn setup_datagram(
         .extend_from_slice(
             EthercatHeader {
                 ethercat_length: host_to_ethercat(
-                    usize::from(ECATTYPE) + ETHERCAT_HEADER_SIZE + data.len(),
-                ) as u16,
+                    (usize::from(ECATTYPE) + ETHERCAT_HEADER_SIZE + data.len()) as u16,
+                ),
                 command,
                 index,
-                address_position,
-                address_offset,
-                data_length: host_to_ethercat(data.len()) as u16,
+                address_position: host_to_ethercat(address_position),
+                address_offset: host_to_ethercat(address_offset),
+                data_length: host_to_ethercat(data.len() as u16),
                 interrupt: 0,
             }
             .as_ref(),
@@ -131,8 +131,10 @@ pub fn add_datagram(
 
     // Add new datargam to ethernet frame size
     datagram.ethercat_length = host_to_ethercat(
-        usize::from(ethercat_to_host(datagram.ethercat_length)) + ETHERCAT_HEADER_SIZE + data.len(),
-    ) as u16;
+        (usize::from(ethercat_to_host(datagram.ethercat_length))
+            + ETHERCAT_HEADER_SIZE
+            + data.len()) as u16,
+    );
     datagram.data_length =
         host_to_ethercat(ethercat_to_host(datagram.data_length) | DATAGRAM_FOLLOWS);
     frame[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
@@ -390,7 +392,7 @@ pub fn aprdw(
     address_position: u16,
     address_offset: EthercatRegister,
     timeout: Duration,
-) -> Result<u16, NicdrvError> {
+) -> Result<Ethercat<u16>, NicdrvError> {
     let mut word = [0; 2];
     aprd(
         port,
@@ -399,7 +401,7 @@ pub fn aprdw(
         &mut word,
         timeout,
     )?;
-    Ok(u16::from_ne_bytes(word))
+    Ok(Ethercat::from_raw(u16::from_ne_bytes(word)))
 }
 
 /// Configured address read primitive (blocking)
@@ -445,10 +447,10 @@ pub fn fprdw(
     address_position: u16,
     address_offset: EthercatRegister,
     timeout: Duration,
-) -> Result<u16, NicdrvError> {
+) -> Result<Ethercat<u16>, NicdrvError> {
     let mut word = [0; 2];
     fprd(port, address_position, address_offset, &mut word, timeout)?;
-    Ok(u16::from_ne_bytes(word))
+    Ok(Ethercat::from_raw(u16::from_ne_bytes(word)))
 }
 
 /// Auto increment address write, word primitive (blocking)
@@ -494,14 +496,14 @@ pub fn apwrw(
     port: &mut Port,
     address_position: u16,
     address_offset: EthercatRegister,
-    data: u16,
+    data: Ethercat<u16>,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     apwr(
         port,
         address_position,
         address_offset as u16,
-        &mut data.to_ne_bytes(),
+        &mut data.into_inner().to_ne_bytes(),
         timeout,
     )
 }
@@ -548,14 +550,14 @@ pub fn fpwrw(
     port: &mut Port,
     address_position: u16,
     address_offset: EthercatRegister,
-    data: u16,
+    data: Ethercat<u16>,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     fpwr(
         port,
         address_position,
         address_offset as u16,
-        &mut data.to_ne_bytes(),
+        &mut data.into_inner().to_ne_bytes(),
         timeout,
     )
 }
@@ -682,7 +684,7 @@ pub fn lrwdc(
             false,
             distributed_clock_reference_slave,
             EthercatRegister::DistributedClockSystemTime.into(),
-            &mut distributed_clock_to_ethercat.to_ne_bytes(),
+            &mut distributed_clock_to_ethercat.into_inner().to_ne_bytes(),
         )
     };
 

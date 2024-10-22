@@ -19,7 +19,8 @@ use heapless::String as HeaplessString;
 use oshw::nicdrv::{Port, RedPort};
 
 use super::r#type::{
-    Error, ErrorInfo, EthercatState, MailboxError, SiiCategory, SiiGeneralItem, MAX_BUF_COUNT,
+    Error, ErrorInfo, Ethercat, EthercatState, MailboxError, SiiCategory, SiiGeneralItem,
+    MAX_BUF_COUNT,
 };
 use crate::oshw;
 
@@ -65,16 +66,16 @@ pub struct EcAdapter {
 /// Fieldbus Memory Management Unit
 #[derive(Debug, Clone, Copy)]
 pub struct Fmmu {
-    pub log_start: u32,
-    pub log_length: u16,
+    pub log_start: Ethercat<u32>,
+    pub log_length: Ethercat<u16>,
     pub log_start_bit: u8,
     pub log_end_bit: u8,
-    pub physical_start: u16,
+    pub physical_start: Ethercat<u16>,
     pub physical_start_bit: u8,
     pub fmmu_type: u8,
     pub fmmu_active: u8,
     pub unused: u8,
-    pub unused2: u16,
+    pub unused2: Ethercat<u16>,
 }
 
 #[allow(unsafe_code)]
@@ -94,9 +95,9 @@ impl<'fmmu> From<&'fmmu mut Fmmu> for &'fmmu mut [u8] {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SyncManager {
-    pub start_address: u16,
-    pub sm_length: u16,
-    pub sm_flags: u32,
+    pub start_address: Ethercat<u16>,
+    pub sm_length: Ethercat<u16>,
+    pub sm_flags: Ethercat<u32>,
 }
 
 #[allow(unsafe_code)]
@@ -625,20 +626,20 @@ impl Default for MailboxOut {
 /// Standard ethercat mailbox header
 #[derive(Debug, Default)]
 pub struct MailboxHeader {
-    pub length: u16,
-    pub address: u16,
+    pub length: Ethercat<u16>,
+    pub address: Ethercat<u16>,
     pub priority: u8,
     pub mailbox_type: u8,
 }
 
 impl MailboxHeader {
     pub fn write_to(&self, bytes: &mut impl Write) -> Result<usize, usize> {
-        let mut bytes_written = match bytes.write(&self.length.to_ne_bytes()) {
+        let mut bytes_written = match bytes.write(&self.length.into_inner().to_ne_bytes()) {
             Ok(written) if written < 2 => return Err(written),
             Ok(written) => written,
             Err(_) => return Err(0),
         };
-        match bytes.write(&self.address.to_ne_bytes()) {
+        match bytes.write(&self.address.into_inner().to_ne_bytes()) {
             Ok(written) if written < 2 => return Err(bytes_written + written),
             Ok(written) => bytes_written += written,
             Err(_) => return Err(bytes_written),
@@ -654,8 +655,8 @@ impl MailboxHeader {
         let mut value = [0; 6];
         bytes.read_exact(&mut value)?;
         Ok(Self {
-            length: u16::from_ne_bytes(value[..2].try_into().unwrap()),
-            address: u16::from_ne_bytes(value[2..4].try_into().unwrap()),
+            length: Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap())),
+            address: Ethercat::from_raw(u16::from_ne_bytes(value[2..4].try_into().unwrap())),
             priority: value[4],
             mailbox_type: value[5],
         })
@@ -836,7 +837,7 @@ pub struct Context<'context> {
 
     /// Registered Ethernet over ethercat hook
     pub ethernet_over_ethercat_hook:
-        fn(context: &mut Context, slave: u16, ecembx: &mut dyn Any) -> i32,
+        fn(context: &mut Context, slave: u16, ecembx: &mut [u8]) -> i32,
 
     /// Flag to control legacy automatic state change or manual state change
     pub manual_state_change: bool,
@@ -958,7 +959,12 @@ pub fn esi_dump(context: &mut Context, slave: u16, esibuf: &mut Vec<u8>) {
     todo!()
 }
 
-pub fn read_eeprom(context: &mut Context, slave: u16, eeproma: u16, timeout: Duration) -> u32 {
+pub fn read_eeprom(
+    context: &mut Context,
+    slave: u16,
+    eeproma: u16,
+    timeout: Duration,
+) -> Ethercat<u32> {
     todo!()
 }
 
@@ -1016,7 +1022,7 @@ pub fn read_eeprom1(context: &mut Context, slave: u16, eeprom_address: SiiGenera
     todo!()
 }
 
-pub fn read_eeprom2(context: &mut Context, slave: u16, timeout: Duration) -> u32 {
+pub fn read_eeprom2(context: &mut Context, slave: u16, timeout: Duration) -> Ethercat<u32> {
     todo!()
 }
 
