@@ -453,7 +453,49 @@ pub fn fprdw(
     Ok(Ethercat::from_raw(u16::from_ne_bytes(word)))
 }
 
-/// Auto increment address write, word primitive (blocking)
+/// Configured address read, long return primitive (blocking)
+///
+/// # Parameters
+/// - `port`: Port context struct
+/// - `address_position`: Address position, slave with that address reads
+/// - `address_offset`: Address offset, slave memory address
+/// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+///
+/// # Returns
+/// Long data from slave
+pub fn fprdl(
+    port: &mut Port,
+    address_position: u16,
+    address_offset: EthercatRegister,
+    timeout: Duration,
+) -> Result<Ethercat<u32>, NicdrvError> {
+    let mut word = [0; 4];
+    fprd(port, address_position, address_offset, &mut word, timeout)?;
+    Ok(Ethercat::from_raw(u32::from_ne_bytes(word)))
+}
+
+/// Configured address read, long long return primitive (blocking)
+///
+/// # Parameters
+/// - `port`: Port context struct
+/// - `address_position`: Address position, slave with that address reads
+/// - `address_offset`: Address offset, slave memory address
+/// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+///
+/// # Returns
+/// Long long data from slave
+pub fn fprdll(
+    port: &mut Port,
+    address_position: u16,
+    address_offset: EthercatRegister,
+    timeout: Duration,
+) -> Result<Ethercat<u64>, NicdrvError> {
+    let mut word = [0; 8];
+    fprd(port, address_position, address_offset, &mut word, timeout)?;
+    Ok(Ethercat::from_raw(u64::from_ne_bytes(word)))
+}
+
+/// Auto increment address write, primitive (blocking)
 ///
 /// # Parameters
 /// - `port`: port context struct

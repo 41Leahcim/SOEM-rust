@@ -5,9 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::oshw::nicdrv::NicdrvError;
 
 use super::{
-    base::{bwr, fprd, fpwr},
+    base::{bwr, fprdl, fprdll, fpwr},
     main::Context,
-    r#type::{ethercat_to_host, host_to_ethercat, Ethercat, EthercatRegister, TIMEOUT_RETURN},
+    r#type::{ethercat_to_host, host_to_ethercat, EthercatRegister, TIMEOUT_RETURN},
 };
 
 pub const PORTM: [u8; 4] = [1, 2, 4, 8];
@@ -62,15 +62,12 @@ pub fn dsync0(
     )?;
 
     // Read local time of slave
-    let mut time1 = [0; 8];
-    fprd(
+    let time1 = ethercat_to_host(fprdll(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockSystemTime,
-        &mut time1,
         TIMEOUT_RETURN,
-    )?;
-    let time1 = ethercat_to_host(Ethercat::from_raw(u64::from_ne_bytes(time1)));
+    )?);
 
     // Calculate first trigger time, always a whole multiple of cycle_time rounded up +
     // the shift_time (can be negative).
@@ -178,15 +175,13 @@ pub fn dsync01(
     )?;
 
     // Read local time of slave
-    let mut time1 = [0; 8];
-    fprd(
+
+    let time1 = ethercat_to_host(fprdll(
         &mut context.port.lock().unwrap(),
         slave_address,
         EthercatRegister::DistributedClockSystemTime,
-        &mut time1,
         TIMEOUT_RETURN,
-    )?;
-    let time1 = ethercat_to_host(Ethercat::from_raw(u64::from_ne_bytes(time1)));
+    )?);
 
     // Calculate first trigger time, always a whole multiple of `true_cycle_time` rounded up
     // + the shift_time (can be negative).
@@ -375,31 +370,25 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
             // This branch has DC slave so remove parenthold
             previous_dc_slave = i;
             let slave_address = context.slavelist[i_usize].config_address;
-            fprd(
+            ht = fprdl(
                 &mut context.port.lock().unwrap(),
                 slave_address,
                 EthercatRegister::DistributedClockTime0,
-                &mut long,
                 TIMEOUT_RETURN,
             )?;
-            ht = i32::from_ne_bytes(long);
-            context.slavelist[i_usize].dc_rt_a =
-                Duration::from_nanos(ethercat_to_host(Ethercat::from_raw(ht)) as u64);
+            context.slavelist[i_usize].dc_rt_a = Duration::from_nanos(ethercat_to_host(ht) as u64);
 
             // 64-bit latched DC receive time A of each specific slave
-            let mut long_long = [0; 8];
-            fprd(
-                &mut context.port.lock().unwrap(),
-                slave_address,
-                EthercatRegister::DistributedClockStartOfFrame,
-                &mut long_long,
-                TIMEOUT_RETURN,
-            )?;
 
             // Use it as offset in order to set local time around 0 + mastertime
-            let hrt = host_to_ethercat(-ethercat_to_host(Ethercat::from_raw(
-                i64::from_ne_bytes(long_long) + mastertime64 as i64,
-            )));
+            let hrt = host_to_ethercat(
+                -((ethercat_to_host(fprdll(
+                    &mut context.port.lock().unwrap(),
+                    slave_address,
+                    EthercatRegister::DistributedClockStartOfFrame,
+                    TIMEOUT_RETURN,
+                )?) + mastertime64) as i64),
+            );
 
             // Save it in the offset register
             fpwr(
@@ -409,36 +398,25 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
                 &mut hrt.to_bytes(),
                 TIMEOUT_RETURN,
             )?;
-            fprd(
+
+            context.slavelist[i_usize].dc_rt_b = Duration::from_nanos(ethercat_to_host(fprdl(
                 &mut context.port.lock().unwrap(),
                 slave_address,
                 EthercatRegister::DistributedClockTime1,
-                &mut long,
                 TIMEOUT_RETURN,
-            )?;
-            context.slavelist[i_usize].dc_rt_b = Duration::from_nanos(ethercat_to_host(
-                Ethercat::from_raw(i32::from_ne_bytes(long)),
-            ) as u64);
-            fprd(
+            )?) as u64);
+            context.slavelist[i_usize].dc_rt_c = Duration::from_nanos(ethercat_to_host(fprdl(
                 &mut context.port.lock().unwrap(),
                 slave_address,
                 EthercatRegister::DistributedClockTime2,
-                &mut long,
                 TIMEOUT_RETURN,
-            )?;
-            context.slavelist[i_usize].dc_rt_c = Duration::from_nanos(ethercat_to_host(
-                Ethercat::from_raw(i32::from_ne_bytes(long)),
-            ) as u64);
-            fprd(
+            )?) as u64);
+            context.slavelist[i_usize].dc_rt_d = Duration::from_nanos(ethercat_to_host(fprdl(
                 &mut context.port.lock().unwrap(),
                 slave_address,
                 EthercatRegister::DistributedClockTime3,
-                &mut long,
                 TIMEOUT_RETURN,
-            )?;
-            context.slavelist[i_usize].dc_rt_d = Duration::from_nanos(ethercat_to_host(
-                Ethercat::from_raw(i32::from_ne_bytes(long)),
-            ) as u64);
+            )?) as u64);
 
             // Make list of active ports and their time stamps
             let mut plist: [u8; 4] = [0; 4];

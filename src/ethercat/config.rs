@@ -14,7 +14,7 @@ use super::{
 use crate::{
     ec_println,
     ethercat::{
-        base::{aprdw, apwrw, brd, bwr, fprd, fprdw, fpwr, fpwrw},
+        base::{aprdw, apwrw, brd, bwr, fprdw, fpwr, fpwrw},
         coe::{read_pdo_map, read_pdo_map_complete_access},
         main::{
             eeprom_to_master, eeprom_to_pdi, read_eeprom, read_eeprom1, read_eeprom2, sii_find,
@@ -422,26 +422,19 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             )?);
             context.slavelist[slave_usize].config_address = config_address;
 
-            let mut word = [0; 2];
-            fprd(
+            context.slavelist[slave_usize].alias_address = ethercat_to_host(fprdw(
                 port,
                 config_address,
                 EthercatRegister::Alias,
-                &mut word,
                 TIMEOUT_RET3,
-            )?;
-            context.slavelist[slave_usize].alias_address =
-                ethercat_to_host(Ethercat::from_raw(u16::from_ne_bytes(word)));
+            )?);
 
-            fprd(
+            let eeprom_state = ethercat_to_host(fprdw(
                 port,
                 config_address,
                 EthercatRegister::EepromControlStat,
-                &mut word,
                 TIMEOUT_RET3,
-            )?;
-
-            let eeprom_state = ethercat_to_host(Ethercat::from_raw(u16::from_ne_bytes(word)));
+            )?);
             context.slavelist[slave_usize].eep_read_size =
                 if eeprom_state & EEPROM_STATE_MACHINE_READ64 != 0 {
                     EepReadSize::Bytes8
@@ -1077,7 +1070,7 @@ pub fn config_create_input_mappings<'a, 'b: 'a>(
             .iter()
             .enumerate()
             .skip(context.slavelist[slave_usize].fmmu_unused.into())
-            .find(|(_, fmmu)| fmmu.log_start.into_inner() == 0)
+            .find(|(_, fmmu)| fmmu.log_start.is_zero())
             .map_or(context.slavelist[slave_usize].fmmu.len(), |(index, _)| {
                 index
             }) as u8

@@ -196,6 +196,10 @@ impl ServiceData {
         }
     }
 
+    pub fn get_word(&self, index: usize) -> Option<Ethercat<u16>> {
+        self.as_words().get(index).copied().map(Ethercat::from_raw)
+    }
+
     pub fn get_long(&self, index: usize) -> Option<Ethercat<u32>> {
         self.as_longs().get(index).copied().map(Ethercat::from_raw)
     }
@@ -1605,7 +1609,7 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
     sdo.reserved = 0;
 
     // Fragments left
-    sdo.fragments = Ethercat::from_raw(0);
+    sdo.fragments = Ethercat::default();
 
     // All objects
     sdo.data.set_word(0, host_to_ethercat(1));
@@ -1683,9 +1687,8 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
                 COEObjectDescriptionCommand::ServiceDataObjectInformationError
             ) {
                 // SDO info error received
-                let abort_error = AbortError::Abort(ethercat_to_host(Ethercat::from_raw(
-                    a_sdo.data.as_longs()[0],
-                )) as i32);
+                let abort_error =
+                    AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
                 sdo_info_error(context, slave, 0, 0, abort_error);
                 result = Err(abort_error.into());
                 stop = true;
@@ -1757,7 +1760,7 @@ pub fn read_od_description(
     sdo.reserved = 0;
 
     // Fragments left
-    sdo.fragments = Ethercat::from_raw(0);
+    sdo.fragments = Ethercat::default();
 
     // Data of index
     sdo.data.set_word(0, host_to_ethercat(od_list.index[item]));
@@ -1781,7 +1784,7 @@ pub fn read_od_description(
         let object_name_length =
             (ethercat_to_host(a_sdo.mailbox_header.length) - 12).min(MAX_NAME_LENGTH);
         od_list.data_type[item] = Datatype::try_from(u8::try_from(ethercat_to_host(
-            Ethercat::from_raw(a_sdo.data.as_words()[1]),
+            a_sdo.data.get_word(1).unwrap(),
         ))?)?;
         od_list.object_code[item] = u16::from(a_sdo.data.as_bytes()[5]);
         od_list.max_sub[item] = a_sdo.data.as_bytes()[4];
@@ -1799,9 +1802,8 @@ pub fn read_od_description(
             a_sdo.opcode,
             COEObjectDescriptionCommand::ServiceDataObjectInformationError
         ) {
-            let abort_error = AbortError::Abort(ethercat_to_host(Ethercat::from_raw(
-                a_sdo.data.as_longs()[0],
-            )) as i32);
+            let abort_error =
+                AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
             sdo_info_error(context, slave, od_list.index[item], 0, abort_error);
             return Err(abort_error.into());
         } else {
@@ -1865,7 +1867,7 @@ pub fn read_oe_single(
     sdo.reserved = 0;
 
     // Fragments left
-    sdo.fragments = Ethercat::from_raw(0);
+    sdo.fragments = Ethercat::default();
     sdo.data.set_word(0, host_to_ethercat(index));
     sdo.data.as_bytes_mut()[2] = sub_index;
     // Get access rights, object category, PDO
@@ -1892,13 +1894,10 @@ pub fn read_oe_single(
         );
         let sub_index = usize::from(sub_index);
         oe_list.value_info[sub_index] = a_sdo.data.as_bytes()[3];
-        oe_list.data_type[sub_index] = Datatype::try_from(ethercat_to_host(Ethercat::from_raw(
-            a_sdo.data.as_words()[2],
-        )) as u8)?;
-        oe_list.bit_length[sub_index] =
-            ethercat_to_host(Ethercat::from_raw(a_sdo.data.as_words()[3]));
-        oe_list.object_access[sub_index] =
-            ethercat_to_host(Ethercat::from_raw(a_sdo.data.as_words()[4]));
+        oe_list.data_type[sub_index] =
+            Datatype::try_from(ethercat_to_host(a_sdo.data.get_word(2).unwrap()) as u8)?;
+        oe_list.bit_length[sub_index] = ethercat_to_host(a_sdo.data.get_word(3).unwrap());
+        oe_list.object_access[sub_index] = ethercat_to_host(a_sdo.data.get_word(4).unwrap());
         oe_list.name[sub_index].clear();
         #[expect(
             clippy::string_from_utf8_as_bytes,
@@ -1915,9 +1914,8 @@ pub fn read_oe_single(
         COEObjectDescriptionCommand::ServiceDataObjectInformationError
     ) {
         // SDO info error received
-        let abort_error = AbortError::Abort(ethercat_to_host(Ethercat::from_raw(
-            a_sdo.data.as_longs()[0],
-        )) as i32);
+        let abort_error =
+            AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
         sdo_info_error(context, slave, index, sub_index, abort_error);
         Err(abort_error.into())
     } else {
