@@ -80,6 +80,7 @@ impl From<EthercatError> for NicdrvError {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum RedundancyMode {
     /// No redundancy, single NIC mode
     None,
@@ -363,7 +364,7 @@ pub fn set_buf_stat(port: &mut Port, index: usize, bufstat: BufferState) {
     if let Some(redport) = port
         .redport
         .as_mut()
-        .filter(|_| !matches!(port.redstate, RedundancyMode::None))
+        .filter(|_| port.redstate != RedundancyMode::None)
     {
         redport.rxbufstat.lock().unwrap()[index] = bufstat;
     }
@@ -386,14 +387,14 @@ pub fn get_index(port: &mut Port) -> u8 {
     let index = (index..)
         .take(MAX_BUF_COUNT)
         .zip(rx_buf_stat.iter().skip(index))
-        .find(|&(_, rx_buf_stat)| matches!(rx_buf_stat, BufferState::Empty))
+        .find(|&(_, rx_buf_stat)| *rx_buf_stat == BufferState::Empty)
         .map(|(index, _)| index)
         .unwrap_or(index);
     rx_buf_stat[index] = BufferState::Alloc;
     if let Some(redport) = port
         .redport
         .as_mut()
-        .filter(|_| !matches!(port.redstate, RedundancyMode::None))
+        .filter(|_| port.redstate != RedundancyMode::None)
     {
         redport.rxbufstat.lock().unwrap()[index] = BufferState::Alloc;
     }
@@ -459,7 +460,7 @@ pub fn out_frame_red(port: &mut Port, index: u8) -> Result<i32, NicdrvError> {
     // Transmit over primary socket
     let rval = out_frame(port, index.into(), 0);
 
-    if !matches!(port.redstate, RedundancyMode::None) {
+    if port.redstate != RedundancyMode::None {
         let mut tmp_buffer = port.temp_tx_buffer.lock().unwrap();
         let mut ehp = EthernetHeader::try_from(tmp_buffer.as_slice())?;
 
@@ -542,10 +543,8 @@ pub fn inframe(port: &mut Port, index: u8, stacknumber: i32) -> Result<u16, Nicd
 
     // Check if requested index is already in buffer
     if usize::from(index) < MAX_BUF_COUNT
-        && !matches!(
-            get_stack(port, stacknumber).rx_buf_stat.lock().unwrap()[usize::from(index)],
-            BufferState::Rcvd
-        )
+        && get_stack(port, stacknumber).rx_buf_stat.lock().unwrap()[usize::from(index)]
+            != BufferState::Rcvd
     {
         let rxbuf = get_stack(port, stacknumber).rx_buffers.lock().unwrap();
         let rxbuf = rxbuf[usize::from(index)].as_slice();
@@ -589,11 +588,9 @@ pub fn inframe(port: &mut Port, index: u8, stacknumber: i32) -> Result<u16, Nicd
                 stack.rx_source_address.lock().unwrap()[usize::from(index)] =
                     ntohs(ehp.source_address[1]).into();
             } else if usize::from(index_found) < MAX_BUF_COUNT
-                && matches!(
-                    get_stack(port, stacknumber).rx_buf_stat.lock().unwrap()
-                        [usize::from(index_found)],
-                    BufferState::Tx
-                )
+                && get_stack(port, stacknumber).rx_buf_stat.lock().unwrap()
+                    [usize::from(index_found)]
+                    == BufferState::Tx
             {
                 // If the index exists and someone is waiting for it
 
@@ -631,7 +628,7 @@ pub fn inframe(port: &mut Port, index: u8, stacknumber: i32) -> Result<u16, Nicd
 /// Workcounter if a frame is found with corresponding index, otherwise `NicdrvError`
 pub fn wait_in_frame_red(port: &mut Port, index: u8, timer: OsalTimer) -> Result<u16, NicdrvError> {
     // If not in redundant mode, always assume secondary is ok
-    let mut wkc2 = if matches!(port.redstate, RedundancyMode::None) {
+    let mut wkc2 = if port.redstate == RedundancyMode::None {
         Ok(0)
     } else {
         Err(NicdrvError::EthercatError(EthercatError::NoFrame))
@@ -645,7 +642,7 @@ pub fn wait_in_frame_red(port: &mut Port, index: u8, timer: OsalTimer) -> Result
         }
 
         // Only try secondary if in redundant mode and not already in
-        if !matches!(port.redstate, RedundancyMode::None) && wkc2.is_err() {
+        if port.redstate != RedundancyMode::None && wkc2.is_err() {
             wkc2 = inframe(port, index, 1);
         }
 
@@ -656,7 +653,7 @@ pub fn wait_in_frame_red(port: &mut Port, index: u8, timer: OsalTimer) -> Result
     }
 
     // Only do redundant functions when in redundant mode
-    if !matches!(port.redstate, RedundancyMode::None) {
+    if port.redstate != RedundancyMode::None {
         // primrx if the received MAC source on the primary socket
         let primrx = if wkc.is_ok() {
             port.rx_source_address.lock().unwrap()[usize::from(index)]

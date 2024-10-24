@@ -256,6 +256,7 @@ pub enum EoEError {
     EoEWrite(EthernetOverEthercatWriteError),
     Mailbox(MailboxError),
     Utf8(Utf8Error),
+    Io(io::Error),
     InvalidFrameType(u8),
     InvalidResponse,
     PacketError,
@@ -285,6 +286,12 @@ impl From<EthernetOverEthercatWriteError> for EoEError {
 impl From<Utf8Error> for EoEError {
     fn from(value: Utf8Error) -> Self {
         Self::Utf8(value)
+    }
+}
+
+impl From<io::Error> for EoEError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
     }
 }
 
@@ -351,36 +358,11 @@ impl TryFrom<&[u8]> for EthernetOverEthercat {
 }
 
 impl EthernetOverEthercat {
-    fn write_to<W: Write>(&self, writer: &mut W) -> Result<usize, EthernetOverEthercatWriteError> {
-        let mut written = self
-            .mailbox_header
-            .write_to(writer)
-            .map_err(EthernetOverEthercatWriteError::FailedToWriteCompletely)?;
-        match writer.write(&self.frame_info1.to_bytes()) {
-            Err(err) => return Err(err.into()),
-            Ok(bytes) if bytes < 2 => {
-                return Err(EthernetOverEthercatWriteError::FailedToWriteCompletely(
-                    written + bytes,
-                ))
-            }
-            Ok(bytes) => written += bytes,
-        }
-        match writer.write(&self.info_result.inner().to_bytes()) {
-            Err(err) => return Err(err.into()),
-            Ok(bytes) if bytes < 2 => {
-                return Err(EthernetOverEthercatWriteError::FailedToWriteCompletely(
-                    written + bytes,
-                ))
-            }
-            Ok(bytes) => written += bytes,
-        }
-        match writer.write(&self.data) {
-            Err(err) => Err(err.into()),
-            Ok(bytes) if bytes < self.data.len() => Err(
-                EthernetOverEthercatWriteError::FailedToWriteCompletely(written + bytes),
-            ),
-            Ok(bytes) => Ok(written + bytes),
-        }
+    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.mailbox_header.write_to(writer)?;
+        writer.write_all(&self.frame_info1.to_bytes())?;
+        writer.write_all(&self.info_result.inner().to_bytes())?;
+        writer.write_all(&self.data)
     }
 }
 

@@ -303,7 +303,7 @@ impl From<EthercatState> for u16 {
 }
 
 /// Possible buffer states
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferState {
     /// Empty
     Empty,
@@ -588,6 +588,7 @@ pub enum MailboxError {
 }
 
 /// Mailbox types
+#[derive(Debug, PartialEq, Eq)]
 pub enum MailboxType {
     /// Error mailbox
     Error,
@@ -643,6 +644,7 @@ impl TryFrom<u8> for MailboxType {
 }
 
 /// CANopen over EtherCat mailbox types
+#[derive(Debug, PartialEq, Eq)]
 pub enum COEMailboxType {
     Emergency = 1,
 
@@ -750,7 +752,7 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
 pub struct InvalidCommand(u8);
 
 /// CANopen over EtherCAT object description command
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum COEObjectDescriptionCommand {
     #[default]
     ObjectDesciptionListRequest = 1,
@@ -791,13 +793,41 @@ impl COEObjectDescriptionCommand {
     }
 }
 
-pub enum FileOverEthercatOpcodes {
+#[derive(Debug, Clone, Copy)]
+#[expect(dead_code)]
+pub struct InvalidFOEOpcode(u8);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FileOverEthercatOpcode {
+    #[default]
     Read = 1,
     Write,
     Data,
     Ack,
     Error,
     Busy,
+}
+
+impl From<FileOverEthercatOpcode> for u8 {
+    fn from(value: FileOverEthercatOpcode) -> Self {
+        value as u8
+    }
+}
+
+impl TryFrom<u8> for FileOverEthercatOpcode {
+    type Error = InvalidFOEOpcode;
+
+    fn try_from(value: u8) -> Result<Self, InvalidFOEOpcode> {
+        match value {
+            1 => Ok(Self::Read),
+            2 => Ok(Self::Write),
+            3 => Ok(Self::Data),
+            4 => Ok(Self::Ack),
+            5 => Ok(Self::Error),
+            6 => Ok(Self::Busy),
+            _ => Err(InvalidFOEOpcode(value)),
+        }
+    }
 }
 
 pub enum ServoOverEthercatOpcodes {
@@ -953,6 +983,7 @@ pub const SDO_TX_PDO_ASSIGN: u16 = 0x1C13;
 /// Ethercat packet type
 pub const ETH_P_ECAT: u16 = 0x88A4;
 
+#[derive(Debug)]
 pub enum ErrorType {
     ServiceDataObjectError,
     Emergency,

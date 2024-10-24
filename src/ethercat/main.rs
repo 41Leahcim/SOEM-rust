@@ -633,22 +633,14 @@ pub struct MailboxHeader {
 }
 
 impl MailboxHeader {
-    pub fn write_to(&self, bytes: &mut impl Write) -> Result<usize, usize> {
-        let mut bytes_written = match bytes.write(&self.length.to_bytes()) {
-            Ok(written) if written < 2 => return Err(written),
-            Ok(written) => written,
-            Err(_) => return Err(0),
-        };
-        match bytes.write(&self.address.to_bytes()) {
-            Ok(written) if written < 2 => return Err(bytes_written + written),
-            Ok(written) => bytes_written += written,
-            Err(_) => return Err(bytes_written),
-        }
-        match bytes.write(&[self.priority, self.mailbox_type]) {
-            Ok(bytes) if bytes < 2 => Err(bytes + bytes_written),
-            Ok(bytes) => Ok(bytes + bytes_written),
-            Err(_) => Err(bytes_written),
-        }
+    pub const fn size() -> usize {
+        2 * size_of::<u16>() + 2 * size_of::<u8>()
+    }
+
+    pub fn write_to(&self, bytes: &mut impl Write) -> io::Result<()> {
+        bytes.write_all(&self.length.to_bytes())?;
+        bytes.write_all(&self.address.to_bytes())?;
+        bytes.write_all(&[self.priority, self.mailbox_type])
     }
 
     pub fn read_from<R: Read>(bytes: &mut R) -> io::Result<Self> {
@@ -833,7 +825,7 @@ pub struct Context<'context> {
     pub eep_fmmu: EepromFmmu,
 
     /// Registered file over ethercat hook
-    pub file_over_ethercat_hook: fn(slave: u16, packetnumber: i32, datasize: i32) -> i32,
+    pub file_over_ethercat_hook: Option<fn(slave: u16, packetnumber: i32, datasize: i32) -> i32>,
 
     /// Registered Ethernet over ethercat hook
     pub ethernet_over_ethercat_hook:
