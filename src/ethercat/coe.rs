@@ -9,30 +9,28 @@ use std::io::Read;
 use std::io::Write;
 use std::num::TryFromIntError;
 use std::str::Utf8Error;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use heapless::String as HeaplessString;
 
 use crate::ethercat::main::SyncManagerType;
-use crate::ethercat::main::{next_mailbox_count, packet_error, MAX_SM, SYNC_MANAGER_ENABLE_MASK};
+use crate::ethercat::main::{next_mailbox_count, MAX_SM, SYNC_MANAGER_ENABLE_MASK};
 use crate::ethercat::r#type::{
     ethercat_to_host, host_to_ethercat, low_byte, mailbox_header_set_count, COEMailboxType,
     CanopenOverEthercatSdoCommand, MailboxType, SDO_PDO_ASSIGNMENT, SDO_SMCOMMTYPE,
     TIMEOUT_TX_MAILBOX,
 };
 
-use super::main::InvalidSyncManagerType;
-use super::main::SyncManagerCommunicationType;
 use super::main::{
-    push_error, Context, MailboxHeader, MailboxIn, MailboxOut, PacketError, MAX_NAME_LENGTH,
+    Context, InvalidSyncManagerType, MailboxHeader, MailboxIn, MailboxOut,
+    MainError as MailboxError, PacketError, SyncManagerCommunicationType, MAX_NAME_LENGTH,
 };
-use super::r#type::Datatype;
-use super::r#type::Ethercat;
-use super::r#type::InvalidCommand;
-use super::r#type::InvalidDataType;
-use super::r#type::TIMEOUT_RX_MAILBOX;
-use super::r#type::{AbortError, COEObjectDescriptionCommand, ErrorInfo, ErrorType, MailboxError};
+use super::r#type::{
+    AbortError, COEObjectDescriptionCommand, Datatype, ErrorInfo, ErrorType, Ethercat,
+    InvalidCommand, InvalidDataType, TIMEOUT_RX_MAILBOX,
+};
 
 /// Invalid Service Data Object size
 #[derive(Debug)]
@@ -415,19 +413,16 @@ pub fn sdo_error(
     sub_index: u8,
     abort_error: AbortError,
 ) {
-    *context.ecaterror.lock().unwrap() = true;
-    push_error(
-        context,
-        ErrorInfo {
-            time: SystemTime::now(),
-            slave,
-            index,
-            sub_index,
-            error_type: ErrorType::ServiceDataObjectError,
-            abort_error,
-            signal: false,
-        },
-    );
+    context.ecaterror.store(true, Ordering::Relaxed);
+    context.push_error(ErrorInfo {
+        time: SystemTime::now(),
+        slave,
+        index,
+        sub_index,
+        error_type: ErrorType::ServiceDataObjectError,
+        abort_error,
+        signal: false,
+    });
 }
 
 /// Report Service Data Object info error
@@ -445,19 +440,16 @@ fn sdo_info_error(
     sub_index: u8,
     abort_error: AbortError,
 ) {
-    *context.ecaterror.lock().unwrap() = true;
-    push_error(
-        context,
-        ErrorInfo {
-            time: SystemTime::now(),
-            signal: false,
-            slave,
-            index,
-            sub_index,
-            error_type: ErrorType::SdoInfoError,
-            abort_error,
-        },
-    );
+    context.ecaterror.store(true, Ordering::Relaxed);
+    context.push_error(ErrorInfo {
+        time: SystemTime::now(),
+        signal: false,
+        slave,
+        index,
+        sub_index,
+        error_type: ErrorType::SdoInfoError,
+        abort_error,
+    });
 }
 
 /// Stores the received abort error or an unexpected frame error
@@ -477,8 +469,7 @@ fn handle_invalid_slave_response(
         abort_error.into()
     } else {
         // Unexpected frame returned
-        packet_error(
-            context,
+        context.packet_error(
             slave,
             index,
             sub_index,
@@ -579,8 +570,7 @@ pub fn sdo_read(
                 parameter_buffer = &mut parameter_buffer[..usize::from(bytesize)];
             } else {
                 // Data container too small for type
-                packet_error(
-                    context,
+                context.packet_error(
                     slave,
                     index,
                     sub_index,
@@ -709,8 +699,7 @@ pub fn sdo_read(
                 }
             } else {
                 // Data container too small for type
-                packet_error(
-                    context,
+                context.packet_error(
                     slave,
                     index,
                     sub_index,
@@ -1090,13 +1079,7 @@ pub fn tx_pdo(
             pdo_buffer = &mut pdo_buffer[..usize::from(framedatasize)];
         } else {
             // Dara container too small for type
-            packet_error(
-                context,
-                slave,
-                0,
-                0,
-                PacketError::DataContainerTooSmallForType,
-            );
+            context.packet_error(slave, 0, 0, PacketError::DataContainerTooSmallForType);
             return Err(PacketError::DataContainerTooSmallForType.into());
         }
     } else {
@@ -1115,13 +1098,7 @@ pub fn tx_pdo(
             );
             return Err(abort_error.into());
         } else {
-            packet_error(
-                context,
-                slave,
-                0,
-                0,
-                PacketError::DataContainerTooSmallForType,
-            );
+            context.packet_error(slave, 0, 0, PacketError::DataContainerTooSmallForType);
             return Err(PacketError::DataContainerTooSmallForType.into());
         }
     }
@@ -1458,7 +1435,7 @@ pub fn read_pdo_map_complete_access(
 
     let number_sync_manager = sync_manager_communication_type.number;
     if number_sync_manager > MAX_SM {
-        packet_error(context, slave, 0, 0, PacketError::TooManySyncManagers);
+        context.packet_error(slave, 0, 0, PacketError::TooManySyncManagers);
         return Err(PacketError::TooManySyncManagers.into());
     }
 
@@ -1639,7 +1616,7 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
                 result = Err(abort_error.into());
                 stop = true;
             } else {
-                packet_error(context, slave, 0, 0, PacketError::UnexpectedFrameReturned);
+                context.packet_error(slave, 0, 0, PacketError::UnexpectedFrameReturned);
             }
             errors += 1;
         }
@@ -1747,8 +1724,7 @@ pub fn read_od_description(
             sdo_info_error(context, slave, od_list.index[item], 0, abort_error);
             return Err(abort_error.into());
         } else {
-            packet_error(
-                context,
+            context.packet_error(
                 slave,
                 od_list.index[item],
                 0,
@@ -1854,7 +1830,7 @@ pub fn read_oe_single(
         Err(abort_error.into())
     } else {
         let error_code = PacketError::UnexpectedFrameReturned;
-        packet_error(context, slave, index, sub_index, error_code);
+        context.packet_error(slave, index, sub_index, error_code);
         Err(error_code.into())
     }
 }

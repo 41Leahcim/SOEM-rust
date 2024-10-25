@@ -11,16 +11,14 @@ use std::{
     time::Duration,
 };
 
-use num_traits::PrimInt;
-
 use crate::ethercat::{
     main::{next_mailbox_count, MailboxOut},
     r#type::{ethercat_to_host, host_to_ethercat, mailbox_header_set_count, MailboxType},
 };
 
 use super::{
-    main::{Context, MailboxHeader, MailboxIn, MAX_MAILBOX_SIZE},
-    r#type::{Ethercat, MailboxError},
+    main::{Context, MailboxHeader, MailboxIn, MainError, MAX_MAILBOX_SIZE},
+    r#type::Ethercat,
 };
 
 /// Use maximum size for EOE mailbox data - mailboxheader and 2 * frameinfo
@@ -38,18 +36,6 @@ pub const IP4_LENGTH: usize = size_of::<u32>();
 
 pub const fn eoe_make_u32(a: u8, b: u8, c: u8, d: u8) -> u32 {
     ((a as u32) << 24) | ((b as u32) << 16) | ((c as u32) << 8) | d as u32
-}
-
-pub fn host_to_network<Int: PrimInt>(value: Int) -> Int {
-    value.to_be()
-}
-
-pub fn network_to_host<Int: PrimInt>(value: Int) -> Int {
-    if cfg!(target_endian = "little") {
-        value.to_le()
-    } else {
-        value
-    }
 }
 
 /// Header frame info 1
@@ -254,7 +240,7 @@ impl EthernetOverEthercatInfoResult {
 pub enum EoEError {
     EoEFromBytes(EthernetOverEthercatFromBytesError),
     EoEWrite(EthernetOverEthercatWriteError),
-    Mailbox(MailboxError),
+    Main(MainError),
     Utf8(Utf8Error),
     Io(io::Error),
     InvalidFrameType(u8),
@@ -265,9 +251,9 @@ pub enum EoEError {
     InvalidRxData,
 }
 
-impl From<MailboxError> for EoEError {
-    fn from(value: MailboxError) -> Self {
-        Self::Mailbox(value)
+impl From<MainError> for EoEError {
+    fn from(value: MainError) -> Self {
+        Self::Main(value)
     }
 }
 

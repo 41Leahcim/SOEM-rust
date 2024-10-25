@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::{
     ethercat::r#type::{ethercat_to_host, DATAGRAM_FOLLOWS, ETHERCAT_LENGTH_SIZE},
-    oshw::nicdrv::{get_index, set_buf_stat, src_confirm, NicdrvError, Port},
+    oshw::nicdrv::{NicdrvError, Port},
 };
 
 use super::r#type::{
@@ -33,12 +33,9 @@ fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u
             | CommandType::BroadcastRead
             | CommandType::LogicalRead => {
                 // No data to write, initialize data so frame is in a known state
-                datagram_data.iter_mut().for_each(|byte| *byte = 0);
+                datagram_data.fill(0);
             }
-            _ => datagram_data
-                .iter_mut()
-                .zip(data)
-                .for_each(|(dest, src)| *dest = *src),
+            _ => datagram_data.copy_from_slice(data),
         }
     }
 }
@@ -46,6 +43,7 @@ fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u
 /// Generate and set EtherCAT datagram in a standard Ethernet frame.
 ///
 /// # Parameters
+/// - `port`: Port context struct
 /// - `frame`: framebuffer
 /// - `command`: Command to execute
 /// - `index`: Index used for TX and RX buffers
@@ -84,12 +82,6 @@ pub fn setup_datagram(
 
     // Set worker count to 0
     frame.extend_from_slice(&[0; 2]).unwrap();
-    frame
-        .resize(
-            ETHERNET_HEADER_SIZE + ETHERCAT_HEADER_SIZE + ETHERCAT_WORK_COUNTER_SIZE + data.len(),
-            0,
-        )
-        .unwrap();
 }
 
 /// Add EtherCAT datagram to a standard ethernet frame with existing datagram(s).
@@ -191,7 +183,7 @@ fn execute_primitive_command(
     command: CommandType,
 ) -> Result<u16, NicdrvError> {
     // Get fresh index
-    let index = get_index(port);
+    let index = port.get_index();
 
     // Setup datagram
     setup_datagram(
@@ -204,7 +196,7 @@ fn execute_primitive_command(
     );
 
     // Send data and wait for answer
-    let wkc = src_confirm(port, index, timeout)?;
+    let wkc = port.src_confirm(index, timeout)?;
 
     match command {
         CommandType::Nop
@@ -229,7 +221,7 @@ fn execute_primitive_command(
     }
 
     // Clear buffer status
-    set_buf_stat(port, index.into(), BufferState::Empty);
+    port.set_buf_stat(index.into(), BufferState::Empty);
 
     Ok(wkc)
 }
@@ -268,11 +260,11 @@ pub fn bwr(
 /// - `port`: port context struct
 /// - `address_position`: Address position, normally 0
 /// - `address_offset`: Address offset, slave memory address
-/// - `length`: length of databuffer
 /// - `data`: databuffer to put slave data in
 /// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
-/// # Returns workcounter or error
+/// # Returns
+/// workcounter or error
 pub fn brd(
     port: &mut Port,
     address_position: u16,
@@ -703,7 +695,7 @@ pub fn lrwdc(
     distributed_clock_time: &mut [i64],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    let index = get_index(port);
+    let index = port.get_index();
     let distributed_clock_offset = {
         let tx_buffer = &mut port.tx_buffers.lock().unwrap()[usize::from(index)];
 
@@ -730,7 +722,7 @@ pub fn lrwdc(
         )
     };
 
-    let mut wkc = src_confirm(port, index, timeout).unwrap();
+    let mut wkc = port.src_confirm(index, timeout).unwrap();
     {
         let rx_buffer = &mut port.rx_buf.lock().unwrap()[usize::from(index)];
         if rx_buffer[ETHERCAT_COMMAND_OFFET] == CommandType::LogicalReadWrite.into() {
@@ -757,7 +749,7 @@ pub fn lrwdc(
             );
         }
     }
-    set_buf_stat(port, usize::from(index), BufferState::Empty);
+    port.set_buf_stat(usize::from(index), BufferState::Empty);
 
     Ok(wkc)
 }

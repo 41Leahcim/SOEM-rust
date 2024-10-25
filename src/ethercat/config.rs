@@ -3,7 +3,7 @@
 //! After successfull initialization with `init()` or `init_redundant()`
 //! the slaves can be auto configured with this module.
 
-use std::{fmt::Write, time::Duration};
+use std::{fmt::Write, str::Utf8Error, time::Duration};
 
 use super::{
     base::aprd,
@@ -17,10 +17,10 @@ use crate::{
         base::{aprdw, apwrw, brd, bwr, fprdw, fpwr, fpwrw},
         coe::{read_pdo_map, read_pdo_map_complete_access},
         main::{
-            eeprom_to_master, eeprom_to_pdi, read_eeprom, read_eeprom1, read_eeprom2, sii_find,
-            sii_fmmu, sii_get_byte, sii_pdo, sii_sm, sii_sm_next, sii_string, statecheck, Coedet,
-            EepReadSize, EepromPdo, Fmmu, MailboxProtocol, SlaveGroup, SyncManager,
-            SyncManagerType, MAX_IO_SEGMENTS, MAX_SM, SYNC_MANAGER_ENABLE_MASK,
+            eeprom_to_master, eeprom_to_pdi, read_eeprom, read_eeprom1, read_eeprom2, statecheck,
+            Coedet, EepReadSize, EepromFmmu, EepromPdo, EepromSyncManager, Fmmu, MailboxProtocol,
+            SlaveGroup, SyncManager, SyncManagerType, MAX_IO_SEGMENTS, MAX_SM,
+            SYNC_MANAGER_ENABLE_MASK,
         },
         r#type::{
             ethercat_to_host, high_word, low_byte, low_word, Ethercat, EthercatRegister,
@@ -39,8 +39,9 @@ pub const TEMP_NODE: u16 = 0xFFFF;
 #[derive(Debug)]
 pub enum ConfigError {
     Nicdrv(NicdrvError),
-    SlaveCountExceeded,
     CoEError(CoEError),
+    Utf8(Utf8Error),
+    SlaveCountExceeded,
     SlaveFailsToRespond,
     FoundWrongSlave,
 }
@@ -54,6 +55,12 @@ impl From<NicdrvError> for ConfigError {
 impl From<CoEError> for ConfigError {
     fn from(value: CoEError) -> Self {
         Self::CoEError(value)
+    }
+}
+
+impl From<Utf8Error> for ConfigError {
+    fn from(value: Utf8Error) -> Self {
+        Self::Utf8(value)
     }
 }
 
@@ -77,7 +84,7 @@ fn init_context(context: &mut Context) {
     context.grouplist.reserve(context.max_group as usize);
 
     // Clear slave eeprom cache, doesn't actually read any eeprom
-    sii_get_byte(context, 0, MAX_EEP_BUF_SIZE);
+    context.sii_get_byte(0, MAX_EEP_BUF_SIZE);
     for lp in 0..context.max_group {
         context.grouplist.push(SlaveGroup {
             logical_start_address: lp << LOG_GROUP_OFFSET,
@@ -620,30 +627,32 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
 
         // Slave not in configuration table, find out via SII
         if config_index == 0 && !lookup_previous_sii(context, slave) {
-            let sii_general = sii_find(context, slave, SiiCategory::General);
+            let sii_general = context
+                .sii_find(slave, SiiCategory::General)
+                .unwrap_or_default();
             if sii_general != 0 {
                 context.slavelist[slave_usize].canopen_over_ethercat_details =
-                    sii_get_byte(context, slave, sii_general + 7);
+                    context.sii_get_byte(slave, sii_general + 7).unwrap();
                 context.slavelist[slave_usize].file_over_ethercat_details =
-                    sii_get_byte(context, slave, sii_general + 8);
+                    context.sii_get_byte(slave, sii_general + 8).unwrap();
                 context.slavelist[slave_usize].ethernet_over_ethercat_details =
-                    sii_get_byte(context, slave, sii_general + 9);
+                    context.sii_get_byte(slave, sii_general + 9).unwrap();
                 context.slavelist[slave_usize].servo_over_ethercat_details =
-                    sii_get_byte(context, slave, sii_general + 0xA);
-                if sii_get_byte(context, slave, sii_general + 0xD) & 0x2 > 0 {
+                    context.sii_get_byte(slave, sii_general + 0xA).unwrap();
+                if context.sii_get_byte(slave, sii_general + 0xD).unwrap() & 0x2 > 0 {
                     context.slavelist[slave_usize].block_logical_read_write = 1;
                     context.slavelist[0].block_logical_read_write += 1;
                 }
                 context.slavelist[slave_usize].ebus_current =
-                    u16::from(sii_get_byte(context, slave, sii_general + 0xE))
-                        + (u16::from(sii_get_byte(context, slave, sii_general + 0xF)) << 8);
+                    u16::from(context.sii_get_byte(slave, sii_general + 0xE).unwrap())
+                        + (u16::from(context.sii_get_byte(slave, sii_general + 0xF).unwrap()) << 8);
                 context.slavelist[0].ebus_current += context.slavelist[slave_usize].ebus_current;
             }
 
             // SII strings section
-            if sii_find(context, slave, SiiCategory::String) > 0 {
+            if context.sii_find(slave, SiiCategory::String).is_some() {
                 let mut name = heapless::String::new();
-                sii_string(context, &mut name, slave, 1);
+                context.sii_string(&mut name, slave, 1)?;
                 context.slavelist[slave_usize].name = name;
             } else {
                 // No name for slave found, use constructed name
@@ -658,9 +667,9 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             }
 
             // SII SM section
-            let mut eep_sync_manager = context.eep_sync_manager.clone();
-            let number_sm = sii_sm(context, slave, &mut eep_sync_manager);
-            context.eep_sync_manager = eep_sync_manager;
+            context.eep_sync_manager = EepromSyncManager::sii_sm(context, slave);
+            let number_sm = context.eep_sync_manager.sync_manager_count;
+
             if number_sm > 0 {
                 context.slavelist[slave_usize].sync_manager[0].start_address =
                     host_to_ethercat(context.eep_sync_manager.phase_start);
@@ -671,14 +680,9 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                         + (u32::from(context.eep_sync_manager.activate) << 16),
                 );
                 let mut sync_manager_count = 1;
-                let mut eep_sync_manager = context.eep_sync_manager.clone();
-                while sync_manager_count < MAX_SM
-                    && sii_sm_next(
-                        context,
-                        slave,
-                        &mut eep_sync_manager,
-                        sync_manager_count.into(),
-                    ) != 0
+                let mut last_eep_sync_manager = context.eep_sync_manager.clone();
+                while let Some(eep_sync_manager) =
+                    last_eep_sync_manager.sii_sm_next(context, slave, sync_manager_count)
                 {
                     let sync_manager_count_usize = usize::from(sync_manager_count);
                     context.slavelist[slave_usize].sync_manager[sync_manager_count_usize]
@@ -691,12 +695,13 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                             + (u32::from(eep_sync_manager.activate) << 16),
                     );
                     sync_manager_count += 1;
+                    last_eep_sync_manager = eep_sync_manager;
                 }
-                context.eep_sync_manager = eep_sync_manager;
+                context.eep_sync_manager = last_eep_sync_manager;
             }
 
-            let mut eep_fmmu = context.eep_fmmu;
-            if sii_fmmu(context, slave, &mut eep_fmmu) != 0 {
+            context.eep_fmmu = EepromFmmu::sii_fmmu(context, slave);
+            if context.eep_fmmu.number_fmmu != 0 {
                 if context.eep_fmmu.fmmu[0] != 0xFF {
                     context.slavelist[slave_usize].fmmu0_function = context.eep_fmmu.fmmu[0];
                 }
@@ -710,7 +715,6 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                     context.slavelist[slave_usize].fmmu3_function = context.eep_fmmu.fmmu[3];
                 }
             }
-            context.eep_fmmu = eep_fmmu;
         }
         if context.slavelist[slave_usize].mailbox_length > 0 {
             let slave_object = &mut context.slavelist[slave_usize];
@@ -821,7 +825,7 @@ pub fn map_coe_soe(
     ec_println!(
         " >Slave {slave}, configaddr {:x}, state {:2.2x}",
         context.slavelist[slave_usize].config_address,
-        context.slavelist[slave_usize].state
+        u8::from(context.slavelist[slave_usize].state)
     );
 
     // Execute special slave configuration hook pre-op to safe-op.
@@ -910,8 +914,8 @@ fn map_sii(context: &mut Context, slave: u16) {
 
     // Find PDO mapping by SII
     if input_size == 0 && output_size == 0 {
-        let mut eepdo = EepromPdo::default();
-        input_size = sii_pdo(context, slave, &mut eepdo, 0);
+        let eepdo;
+        (input_size, eepdo) = EepromPdo::sii_pdo(context, slave, false);
 
         ec_println!("  SII input_size:{input_size}");
         for sm_index in 0..usize::from(MAX_SM) {

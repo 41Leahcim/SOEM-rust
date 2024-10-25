@@ -15,7 +15,9 @@ use std::{
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use num_traits::PrimInt;
 
-use crate::oshw::htons;
+use crate::oshw::{host_to_network, Network};
+
+use super::main::{MainError, PacketError};
 
 /// Possible error codes returned
 #[derive(Debug)]
@@ -119,20 +121,20 @@ pub enum EthernetHeaderError {
 #[derive(Debug, Clone, Copy)]
 pub struct EthernetHeader {
     /// Destination MAC
-    pub destination_address: [u16; 3],
+    pub destination_address: [Network<u16>; 3],
 
     // Source MAC
-    pub source_address: [u16; 3],
+    pub source_address: [Network<u16>; 3],
 
     /// Ethernet type
-    pub etype: u16,
+    pub etype: Network<u16>,
 }
 
 impl EthernetHeader {
     pub fn new(mac: [u16; 3]) -> Self {
-        let destination_address = array::from_fn(|_| htons(0xFFFF));
-        let source_address = array::from_fn(|i| htons(mac[i]));
-        let etype = htons(ETH_P_ECAT);
+        let destination_address = array::from_fn(|_| host_to_network(0xFFFF));
+        let source_address = array::from_fn(|i| host_to_network(mac[i]));
+        let etype = host_to_network(ETH_P_ECAT);
         Self {
             destination_address,
             source_address,
@@ -151,9 +153,9 @@ impl TryFrom<&[u8]> for EthernetHeader {
         let mut words = value
             .chunks(2)
             .map(|chunk| u16::from_le_bytes(array::from_fn(|i| chunk[i])));
-        let destination_address = array::from_fn(|_| words.next().unwrap());
-        let source_address = array::from_fn(|_| words.next().unwrap());
-        let etype = words.next().unwrap();
+        let destination_address = array::from_fn(|_| Network::from_raw(words.next().unwrap()));
+        let source_address = array::from_fn(|_| Network::from_raw(words.next().unwrap()));
+        let etype = Network::from_raw(words.next().unwrap());
         Ok(Self {
             destination_address,
             source_address,
@@ -267,6 +269,7 @@ pub const ETHERCAT_WORK_COUNTER_SIZE: usize = size_of::<u16>();
 /// Definition of datagram follows bit in EthercatHeader.data_length
 pub const DATAGRAM_FOLLOWS: u16 = 1 << 15;
 
+#[derive(Debug, Clone, Copy)]
 pub enum EthercatState {
     /// No valid state
     None,
@@ -299,6 +302,23 @@ impl From<EthercatState> for u8 {
 impl From<EthercatState> for u16 {
     fn from(value: EthercatState) -> Self {
         u16::from(u8::from(value))
+    }
+}
+
+impl TryFrom<u8> for EthercatState {
+    type Error = MainError;
+
+    fn try_from(value: u8) -> Result<Self, MainError> {
+        match value {
+            0 => Ok(EthercatState::None),
+            1 => Ok(EthercatState::Init),
+            2 => Ok(EthercatState::PreOperational),
+            3 => Ok(EthercatState::Boot),
+            4 => Ok(EthercatState::SafeOperational),
+            8 => Ok(EthercatState::Operational),
+            0x10 => Ok(EthercatState::Error),
+            _ => Err(MainError::InvalidEthercatState(value)),
+        }
     }
 }
 
@@ -522,6 +542,7 @@ pub const EEPROM_STATE_MACHINE_ERROR_NACK: u16 = 0x2000;
 
 pub const SII_START: u16 = 0x40;
 
+#[derive(Debug, Clone, Copy)]
 pub enum SiiCategory {
     /// SII category strings
     String = 10,
@@ -535,8 +556,23 @@ pub enum SiiCategory {
     /// SII category Sync manager
     SM = 41,
 
-    /// SII category Process data object
-    PDO = 50,
+    /// SII category receiving Process Data Object
+    PDOReceive = 50,
+
+    /// SII category sending Process Data Object
+    PDOSend = 51,
+}
+
+impl From<SiiCategory> for u8 {
+    fn from(value: SiiCategory) -> Self {
+        value as u8
+    }
+}
+
+impl From<SiiCategory> for u16 {
+    fn from(value: SiiCategory) -> Self {
+        u16::from(u8::from(value))
+    }
 }
 
 /// Item offsets in SII general section
@@ -581,12 +617,6 @@ impl From<SiiGeneralItem> for u16 {
     }
 }
 
-#[derive(Debug)]
-pub enum MailboxError {
-    InvalidMailboxType(u8),
-    InvalidCOEMailboxType(u8),
-}
-
 /// Mailbox types
 #[derive(Debug, PartialEq, Eq)]
 pub enum MailboxType {
@@ -627,9 +657,9 @@ impl From<MailboxType> for u8 {
 }
 
 impl TryFrom<u8> for MailboxType {
-    type Error = MailboxError;
+    type Error = MainError;
 
-    fn try_from(value: u8) -> Result<Self, MailboxError> {
+    fn try_from(value: u8) -> Result<Self, MainError> {
         match value {
             0 => Ok(MailboxType::Error),
             1 => Ok(MailboxType::AdsOverEthercat),
@@ -638,7 +668,7 @@ impl TryFrom<u8> for MailboxType {
             4 => Ok(MailboxType::FileOverEthercat),
             5 => Ok(MailboxType::ServoOverEthercat),
             0xF => Ok(MailboxType::VendorOverEthercat),
-            _ => Err(MailboxError::InvalidMailboxType(value)),
+            _ => Err(MainError::InvalidMailboxType(value)),
         }
     }
 }
@@ -671,7 +701,7 @@ pub enum COEMailboxType {
 }
 
 impl TryFrom<u8> for COEMailboxType {
-    type Error = MailboxError;
+    type Error = MainError;
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::Emergency),
@@ -682,7 +712,7 @@ impl TryFrom<u8> for COEMailboxType {
             6 => Ok(Self::TxPdoRR),
             7 => Ok(Self::RxPdoRR),
             8 => Ok(Self::SdoInfo),
-            _ => Err(MailboxError::InvalidCOEMailboxType(value)),
+            _ => Err(MainError::InvalidCOEMailboxType(value)),
         }
     }
 }
@@ -983,7 +1013,7 @@ pub const SDO_TX_PDO_ASSIGN: u16 = 0x1C13;
 /// Ethercat packet type
 pub const ETH_P_ECAT: u16 = 0x88A4;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ErrorType {
     ServiceDataObjectError,
     Emergency,
@@ -1008,16 +1038,20 @@ pub enum ErrorType {
 #[repr(i32)]
 pub enum AbortError {
     Abort(i32),
-    Error {
+    ErrorCode(u16),
+    PacketError(PacketError),
+    EmergencyError {
         error_code: u16,
         error_register: u8,
-        b1: u8,
-        w1: u16,
-        w2: u16,
+        byte1: u8,
+        word1: u16,
+        word2: u16,
     },
     TooManyMasterBufferEntries = 0xF000000,
 }
 
+/// Struct to retrieve errors
+#[derive(Debug, Clone, Copy)]
 pub struct ErrorInfo {
     /// TIme at which the error was generated
     pub time: SystemTime,

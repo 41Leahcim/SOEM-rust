@@ -17,23 +17,23 @@ use crate::ethercat::{
 };
 
 use super::{
-    main::{Context, MailboxHeader},
-    r#type::{Ethercat, InvalidFOEOpcode, MailboxError},
+    main::{Context, MailboxHeader, MainError},
+    r#type::{Ethercat, InvalidFOEOpcode},
 };
 
 const MAX_FOE_DATA: usize = 512;
 
 #[derive(Debug)]
 pub enum FoEError {
-    Mailbox(MailboxError),
+    Main(MainError),
     Io(io::Error),
     InvalidOpcode(InvalidFOEOpcode),
     ErrorType(ErrorType),
 }
 
-impl From<MailboxError> for FoEError {
-    fn from(value: MailboxError) -> Self {
-        Self::Mailbox(value)
+impl From<MainError> for FoEError {
+    fn from(value: MainError) -> Self {
+        Self::Main(value)
     }
 }
 
