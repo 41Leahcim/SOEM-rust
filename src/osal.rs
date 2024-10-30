@@ -13,7 +13,7 @@ impl OsalTimer {
         }
     }
 
-    pub fn start(&mut self, timeout: Duration) {
+    pub fn restart(&mut self, timeout: Duration) {
         *self = Self::new(timeout);
     }
 

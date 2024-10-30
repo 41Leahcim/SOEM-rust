@@ -44,12 +44,15 @@ pub fn network_to_host<Int: PrimInt>(network_short: Network<Int>) -> Int {
 
 /// Create list over available network adapters.
 ///
+/// # Panics
+/// Panics if the name of an interface is too long
+///
 /// # Returns
 /// First element in linked list of adapters
 pub fn find_adaters() -> Vec<Adapter> {
     // Iterate all devices and create a local copy holding the name and description
     let ids = unsafe { if_nameindex() };
-    (0..)
+    (0..usize::MAX)
         .filter_map(|i| unsafe { ids.add(i).as_mut() })
         .take_while(|id| id.if_index != 0)
         .map(|id| {

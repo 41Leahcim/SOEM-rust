@@ -164,7 +164,7 @@ impl TryFrom<&[u8]> for EthernetHeader {
     }
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl NoUninit for EthernetHeader {}
 
 impl AsRef<[u8]> for EthernetHeader {
@@ -173,10 +173,10 @@ impl AsRef<[u8]> for EthernetHeader {
     }
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl Zeroable for EthernetHeader {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl AnyBitPattern for EthernetHeader {}
 
 impl AsMut<[u8]> for EthernetHeader {
@@ -245,7 +245,7 @@ impl TryFrom<&[u8]> for EthercatHeader {
     }
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl NoUninit for EthercatHeader {}
 
 impl AsRef<[u8]> for EthercatHeader {
@@ -342,7 +342,7 @@ pub enum BufferState {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct InvalidDataType(u8);
 
 /// Ethercat data types
@@ -415,7 +415,7 @@ impl TryFrom<u8> for Datatype {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug)]
 pub struct InvalidCommandType(u8);
 
@@ -470,23 +470,7 @@ pub enum CommandType {
 
 impl From<CommandType> for u8 {
     fn from(value: CommandType) -> Self {
-        match value {
-            CommandType::Nop => 0,
-            CommandType::AutoPointerRead => 1,
-            CommandType::AutoPointerWrite => 2,
-            CommandType::AutoPointerReadWrite => 3,
-            CommandType::FixedPointerRead => 4,
-            CommandType::FixedPointerWrite => 5,
-            CommandType::FixedPointerReadWrite => 6,
-            CommandType::BroadcastRead => 7,
-            CommandType::BroadcastWrite => 8,
-            CommandType::BroadcastReadWrite => 9,
-            CommandType::LogicalRead => 10,
-            CommandType::LogicalWrite => 11,
-            CommandType::LogicalReadWrite => 12,
-            CommandType::AutoReadMultipleWrite => 13,
-            CommandType::FixedReadMultipleWrite => 14,
-        }
+        value as u8
     }
 }
 
@@ -515,7 +499,8 @@ impl TryFrom<u8> for CommandType {
     }
 }
 
-pub enum EepromCommandType {
+#[derive(Debug, Clone, Copy)]
+pub enum EepromCommand {
     /// No operation
     Nop = 0x0,
 
@@ -526,6 +511,12 @@ pub enum EepromCommandType {
     Write = 0x201,
 
     Reload = 0x300,
+}
+
+impl From<EepromCommand> for u16 {
+    fn from(value: EepromCommand) -> Self {
+        value as u16
+    }
 }
 
 /// EEprom state machine 8 byte chunk read ability
@@ -777,7 +768,7 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug)]
 pub struct InvalidCommand(u8);
 
@@ -1047,7 +1038,7 @@ pub enum AbortError {
         word1: u16,
         word2: u16,
     },
-    TooManyMasterBufferEntries = 0xF000000,
+    TooManyMasterBufferEntries = 0x0F00_0000,
 }
 
 /// Struct to retrieve errors
@@ -1112,11 +1103,11 @@ unsafe impl<Int: PrimInt> Zeroable for Ethercat<Int> {}
 unsafe impl<Int: PrimInt + 'static> Pod for Ethercat<Int> {}
 
 impl<Int: PrimInt> Ethercat<Int> {
-    pub fn from_raw(value: Int) -> Self {
+    pub const fn from_raw(value: Int) -> Self {
         Self(value)
     }
 
-    pub fn into_inner(self) -> Int {
+    pub const fn into_inner(self) -> Int {
         self.0
     }
 
@@ -1125,29 +1116,25 @@ impl<Int: PrimInt> Ethercat<Int> {
     }
 }
 
-impl Ethercat<u16> {
-    pub fn to_bytes(self) -> [u8; 2] {
-        self.0.to_ne_bytes()
-    }
+macro_rules! ethercat_bytes {
+    ($data_type: ident) => {
+        impl Ethercat<$data_type> {
+            pub const fn to_bytes(self) -> [u8; size_of::<$data_type>()] {
+                self.0.to_ne_bytes()
+            }
+
+            pub const fn from_bytes(bytes: [u8; size_of::<$data_type>()]) -> Self {
+                Self::from_raw($data_type::from_ne_bytes(bytes))
+            }
+        }
+    };
 }
 
-impl Ethercat<u32> {
-    pub fn to_bytes(self) -> [u8; 4] {
-        self.0.to_ne_bytes()
-    }
-}
-
-impl Ethercat<i32> {
-    pub fn to_bytes(self) -> [u8; 4] {
-        self.0.to_ne_bytes()
-    }
-}
-
-impl Ethercat<i64> {
-    pub fn to_bytes(self) -> [u8; 8] {
-        self.0.to_ne_bytes()
-    }
-}
+ethercat_bytes!(u16);
+ethercat_bytes!(u32);
+ethercat_bytes!(i32);
+ethercat_bytes!(i64);
+ethercat_bytes!(u64);
 
 pub fn host_to_ethercat<Int: PrimInt>(value: Int) -> Ethercat<Int> {
     Ethercat(value.to_le())

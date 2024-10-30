@@ -3,12 +3,12 @@
 //! After successfull initialization with `init()` or `init_redundant()`
 //! the slaves can be auto configured with this module.
 
-use std::{fmt::Write, str::Utf8Error, time::Duration};
+use std::{collections::VecDeque, fmt::Write, str::Utf8Error, time::Duration};
 
 use super::{
     base::aprd,
     coe::CoEError,
-    main::{Context, Slave},
+    main::{Context, EepromRequest, MainError, Slave},
     r#type::host_to_ethercat,
 };
 use crate::{
@@ -17,7 +17,6 @@ use crate::{
         base::{aprdw, apwrw, brd, bwr, fprdw, fpwr, fpwrw},
         coe::{read_pdo_map, read_pdo_map_complete_access},
         main::{
-            eeprom_to_master, eeprom_to_pdi, read_eeprom, read_eeprom1, read_eeprom2, statecheck,
             Coedet, EepReadSize, EepromFmmu, EepromPdo, EepromSyncManager, Fmmu, MailboxProtocol,
             SlaveGroup, SyncManager, SyncManagerType, MAX_IO_SEGMENTS, MAX_SM,
             SYNC_MANAGER_ENABLE_MASK,
@@ -40,6 +39,7 @@ pub const TEMP_NODE: u16 = 0xFFFF;
 pub enum ConfigError {
     Nicdrv(NicdrvError),
     CoEError(CoEError),
+    Main(MainError),
     Utf8(Utf8Error),
     SlaveCountExceeded,
     SlaveFailsToRespond,
@@ -64,17 +64,23 @@ impl From<Utf8Error> for ConfigError {
     }
 }
 
+impl From<MainError> for ConfigError {
+    fn from(value: MainError) -> Self {
+        Self::Main(value)
+    }
+}
+
 /// Standard SyncManager0 flags configuration for mailbox slaves
-const DEFAULT_MAILBOX_SM0: u32 = 0x00010026;
+const DEFAULT_MAILBOX_SM0: u32 = 0x0001_0026;
 
 /// Standard SyncManager1 flags configuration for mailbox slaves
-const DEFAULT_MAILBOX_SM1: u32 = 0x00010022;
+const DEFAULT_MAILBOX_SM1: u32 = 0x0001_0022;
 
 /// Resets the slavelist and grouplist.
 ///
 /// # Parameters
 /// - `context`: The context containing the slavelist and grouplist to reset.
-fn init_context(context: &mut Context) {
+fn init_context(context: &mut Context) -> Result<(), MainError> {
     context.slave_count = 0;
 
     // Clean slave list and grouplist
@@ -84,13 +90,14 @@ fn init_context(context: &mut Context) {
     context.grouplist.reserve(context.max_group as usize);
 
     // Clear slave eeprom cache, doesn't actually read any eeprom
-    context.sii_get_byte(0, MAX_EEP_BUF_SIZE);
+    context.sii_get_byte(0, MAX_EEP_BUF_SIZE)?;
     for lp in 0..context.max_group {
         context.grouplist.push(SlaveGroup {
             logical_start_address: lp << LOG_GROUP_OFFSET,
             ..Default::default()
         });
     }
+    Ok(())
 }
 
 /// Resets and detects slaves.
@@ -107,7 +114,7 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
     // Ignore alias register
     let mut byte = [0];
     bwr(
-        &mut context.port.lock().unwrap(),
+        &mut context.port,
         0,
         EthercatRegister::DeviceLayerAlias,
         &mut byte,
@@ -117,7 +124,7 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
     // Reset all slaves to initialization
     byte[0] = EthercatState::Init as u8 | EthercatState::Error as u8;
     bwr(
-        &mut context.port.lock().unwrap(),
+        &mut context.port,
         0,
         EthercatRegister::ApplicationLayerControl,
         &mut byte,
@@ -127,7 +134,7 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
 
     // Reset all slaves to initialization
     bwr(
-        &mut context.port.lock().unwrap(),
+        &mut context.port,
         0,
         EthercatRegister::ApplicationLayerControl,
         &mut byte,
@@ -136,7 +143,7 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
 
     // Detect the number of slaves
     let work_counter = brd(
-        &mut context.port.lock().unwrap(),
+        &mut context.port,
         0,
         EthercatRegister::Type,
         &mut byte,
@@ -159,7 +166,7 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
 fn set_slaves_to_default(context: &mut Context) -> Result<(), NicdrvError> {
     let mut zero_buffer = [0; 64];
     let mut byte = [0];
-    let port = &mut context.port.lock().unwrap();
+    let port = &mut context.port;
 
     // Deactivate loop manual
     bwr(
@@ -358,13 +365,18 @@ pub fn lookup_previous_sii(context: &mut Context, slave: u16) -> bool {
 fn async_eeprom_read(
     context: &mut Context,
     next_value: SiiGeneralItem,
+    eeprom_requests: VecDeque<EepromRequest>,
     storing_function: impl Fn(&mut Slave, Ethercat<u32>),
-) {
-    for slave in 1..context.slave_count {
-        let eedata = read_eeprom2(context, slave, TIMEOUT_EEP);
-        storing_function(&mut context.slavelist[usize::from(slave)], eedata);
-        read_eeprom1(context, slave, next_value);
-    }
+) -> Result<VecDeque<EepromRequest>, MainError> {
+    eeprom_requests
+        .into_iter()
+        .zip(0..context.slave_count)
+        .map(|(request, slave)| {
+            let eedata = request.read_eeprom_data(context, TIMEOUT_EEP)?;
+            storing_function(&mut context.slavelist[usize::from(slave)], eedata);
+            EepromRequest::request_eeprom_data(context, slave, next_value)
+        })
+        .collect()
 }
 
 /// Enumerate and initialize all slaves
@@ -373,21 +385,33 @@ fn async_eeprom_read(
 /// - `context`: Context struct
 /// - `usetable`: true when using configtable to initialize slaves, false otherwise
 ///
+///
+/// # Errors
+/// Returns an error if:
+/// - Failed to detect slaves
+/// - Failed to request interface type of slave
+/// - Failed to set node address of slave
+/// - Failed to set behaviour of slave when it receives a non-ecat frame
+/// - Failed to initiate a parallel EEPROM request
+/// -
+///
 /// # Returns
 /// Number of slaves found or error
+#[expect(clippy::missing_panics_doc)]
 pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, ConfigError> {
     ec_println!("ec_config_init {use_table}");
-    init_context(context);
+    init_context(context)?;
     let slave_count = detect_slaves(context)?;
 
     set_slaves_to_default(context)?;
+    let mut eeprom_requests = VecDeque::with_capacity(usize::from(context.slave_count));
 
     for slave in 0..context.slave_count {
         let slave_usize = usize::from(slave);
         let address_position = 1u16.wrapping_sub(slave);
 
         {
-            let port = &mut context.port.lock().unwrap();
+            let port = &mut context.port;
 
             // Read interface type of slave
             let val16 = aprdw(
@@ -451,38 +475,60 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         }
 
         // Read the manufacturer of the slave from it's EEPROM
-        read_eeprom1(context, slave, SiiGeneralItem::Manufacturer);
+        eeprom_requests.push_back(EepromRequest::request_eeprom_data(
+            context,
+            slave,
+            SiiGeneralItem::Manufacturer,
+        )?);
     }
 
     // Store manufacturer and request id
-    async_eeprom_read(context, SiiGeneralItem::Id, |slave, manufacturer| {
-        slave.eep_manufacturer = ethercat_to_host(manufacturer);
-    });
+    eeprom_requests = async_eeprom_read(
+        context,
+        SiiGeneralItem::Id,
+        eeprom_requests,
+        |slave, manufacturer| {
+            slave.eep_manufacturer = ethercat_to_host(manufacturer);
+        },
+    )?;
 
     // Store ID and request revision
-    async_eeprom_read(context, SiiGeneralItem::Revision, |slave, id| {
-        slave.eep_id = ethercat_to_host(id);
-    });
+    eeprom_requests = async_eeprom_read(
+        context,
+        SiiGeneralItem::Revision,
+        eeprom_requests,
+        |slave, id| {
+            slave.eep_id = ethercat_to_host(id);
+        },
+    )?;
 
     // Store revision and request mailbox address + mailbox size
-    async_eeprom_read(
+    eeprom_requests = async_eeprom_read(
         context,
         SiiGeneralItem::RxMailboxAddress,
+        eeprom_requests,
         |slave, revision| {
             slave.eep_revision = ethercat_to_host(revision);
         },
-    );
+    )?;
 
     for slave in 1..context.slave_count {
         let slave_usize = usize::from(slave);
         // Mailbox address and mailbox size
-        let mailbox_rx = read_eeprom2(context, slave, TIMEOUT_EEP);
+        let mailbox_rx = eeprom_requests
+            .pop_front()
+            .unwrap()
+            .read_eeprom_data(context, TIMEOUT_EEP)?;
         context.slavelist[slave_usize].mailbox_read_offset = low_word(ethercat_to_host(mailbox_rx));
         context.slavelist[slave_usize].mailbox_length = high_word(ethercat_to_host(mailbox_rx));
 
         if context.slavelist[slave_usize].mailbox_length > 0 {
             // Read mailbox offset
-            read_eeprom1(context, slave, SiiGeneralItem::TxMailboxAddress);
+            eeprom_requests.push_back(EepromRequest::request_eeprom_data(
+                context,
+                slave,
+                SiiGeneralItem::TxMailboxAddress,
+            )?);
         }
     }
 
@@ -490,7 +536,10 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         let slave_usize = usize::from(slave);
         if context.slavelist[slave_usize].mailbox_length > 0 {
             // Read mailbox information
-            let mailbox_info = read_eeprom2(context, slave, TIMEOUT_EEP);
+            let mailbox_info = eeprom_requests
+                .pop_front()
+                .unwrap()
+                .read_eeprom_data(context, TIMEOUT_EEP)?;
             context.slavelist[slave_usize].mailbox_read_offset =
                 low_word(ethercat_to_host(mailbox_info));
             context.slavelist[slave_usize].mailbox_read_length =
@@ -499,11 +548,15 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                 context.slavelist[slave_usize].mailbox_read_length =
                     context.slavelist[slave_usize].mailbox_length;
             }
-            read_eeprom1(context, slave, SiiGeneralItem::MailboxProtocol);
+            eeprom_requests.push_back(EepromRequest::request_eeprom_data(
+                context,
+                slave,
+                SiiGeneralItem::MailboxProtocol,
+            )?);
         }
         let config_address = context.slavelist[slave_usize].config_address;
         let escsup = fprdw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             config_address,
             EthercatRegister::EscSup,
             TIMEOUT_RET3,
@@ -514,7 +567,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
 
         // Extract topology from DL status
         let topology = ethercat_to_host(fprdw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             config_address,
             EthercatRegister::DeviceLayerStatus,
             TIMEOUT_RET3,
@@ -548,7 +601,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
 
         // Physical type
         context.slavelist[slave_usize].physical_type = low_byte(ethercat_to_host(fprdw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             config_address,
             EthercatRegister::PortDescriptor,
             TIMEOUT_RET3,
@@ -596,7 +649,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         }
 
         // Check state change init
-        statecheck(context, slave, EthercatState::Init, TIMEOUT_STATE);
+        context.check_state(slave, EthercatState::Init, TIMEOUT_STATE)?;
 
         // Set default mailbox configuration if slave has mailbox
         if context.slavelist[slave_usize].mailbox_length > 0 {
@@ -615,8 +668,12 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             slave_object.sync_manager[1].sm_length =
                 host_to_ethercat(slave_object.mailbox_read_offset);
             slave_object.sync_manager[1].sm_flags = host_to_ethercat(DEFAULT_MAILBOX_SM1);
-            context.slavelist[slave_usize].mailbox_protocols =
-                ethercat_to_host(read_eeprom2(context, slave, TIMEOUT_EEP)) as u16;
+            context.slavelist[slave_usize].mailbox_protocols = ethercat_to_host(
+                eeprom_requests
+                    .pop_front()
+                    .unwrap()
+                    .read_eeprom_data(context, TIMEOUT_EEP)?,
+            ) as u16;
         }
 
         let config_index = if use_table {
@@ -650,10 +707,8 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             }
 
             // SII strings section
-            if context.sii_find(slave, SiiCategory::String).is_some() {
-                let mut name = heapless::String::new();
-                context.sii_string(&mut name, slave, 1)?;
-                context.slavelist[slave_usize].name = name;
+            if context.sii_find(slave, SiiCategory::String).is_ok() {
+                context.slavelist[slave_usize].name = context.sii_string(slave, 1)?;
             } else {
                 // No name for slave found, use constructed name
                 let manufacturer = context.slavelist[slave_usize].eep_manufacturer;
@@ -667,7 +722,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             }
 
             // SII SM section
-            context.eep_sync_manager = EepromSyncManager::sii_sm(context, slave);
+            context.eep_sync_manager = EepromSyncManager::sii_sm(context, slave)?;
             let number_sm = context.eep_sync_manager.sync_manager_count;
 
             if number_sm > 0 {
@@ -681,7 +736,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                 );
                 let mut sync_manager_count = 1;
                 let mut last_eep_sync_manager = context.eep_sync_manager.clone();
-                while let Some(eep_sync_manager) =
+                while let Ok(eep_sync_manager) =
                     last_eep_sync_manager.sii_sm_next(context, slave, sync_manager_count)
                 {
                     let sync_manager_count_usize = usize::from(sync_manager_count);
@@ -700,7 +755,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                 context.eep_sync_manager = last_eep_sync_manager;
             }
 
-            context.eep_fmmu = EepromFmmu::sii_fmmu(context, slave);
+            context.eep_fmmu = EepromFmmu::sii_fmmu(context, slave)?;
             if context.eep_fmmu.number_fmmu != 0 {
                 if context.eep_fmmu.fmmu[0] != 0xFF {
                     context.slavelist[slave_usize].fmmu0_function = context.eep_fmmu.fmmu[0];
@@ -740,7 +795,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             // Program SM0 mailbox in and SM1 mailbox out for slave.
             // Writing both sm in one datagram will solve timing issue in old NETX
             fpwr(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 config_address,
                 EthercatRegister::SyncManager0 as u16,
                 <&mut [u8]>::from(&mut context.slavelist[slave_usize].sync_manager[0]),
@@ -749,13 +804,13 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         }
 
         // Some slaves need eeprom available to PDI in init -> preop transition
-        eeprom_to_pdi(context, slave);
+        context.eeprom_to_pdi(slave)?;
 
         // User may override automatic state change
         if !context.manual_state_change {
             // Request pre-op for slave
             fpwrw(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 config_address,
                 EthercatRegister::ApplicationLayerControl,
                 host_to_ethercat(
@@ -813,13 +868,17 @@ pub fn lookup_mapping(
     false
 }
 
+/// # Errors
+/// Returns an error if:
+/// - The state of the slave couldn't be checked.
+/// - PDO map couldn't be read/parsed
 pub fn map_coe_soe(
     context: &mut Context,
     slave: u16,
     thread_number: usize,
 ) -> Result<(), CoEError> {
     // Check state change pre-op
-    statecheck(context, slave, EthercatState::PreOperational, TIMEOUT_STATE);
+    context.check_state(slave, EthercatState::PreOperational, TIMEOUT_STATE)?;
 
     let slave_usize = usize::from(slave);
     ec_println!(
@@ -901,7 +960,7 @@ pub fn map_coe_soe(
     Ok(())
 }
 
-fn map_sii(context: &mut Context, slave: u16) {
+fn map_sii(context: &mut Context, slave: u16) -> Result<(), MainError> {
     let slave_usize = slave as usize;
 
     let mut output_size = u32::from(context.slavelist[slave_usize].output_bits);
@@ -915,7 +974,7 @@ fn map_sii(context: &mut Context, slave: u16) {
     // Find PDO mapping by SII
     if input_size == 0 && output_size == 0 {
         let eepdo;
-        (input_size, eepdo) = EepromPdo::sii_pdo(context, slave, false);
+        (input_size, eepdo) = EepromPdo::sii_pdo(context, slave, false)?;
 
         ec_println!("  SII input_size:{input_size}");
         for sm_index in 0..usize::from(MAX_SM) {
@@ -934,6 +993,7 @@ fn map_sii(context: &mut Context, slave: u16) {
     context.slavelist[slave_usize].output_bits = output_size as u16;
     context.slavelist[slave_usize].input_bits = input_size as u16;
     ec_println!("     input_size:{input_size} output_size:{output_size}");
+    Ok(())
 }
 
 fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
@@ -947,7 +1007,7 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
             .is_zero()
     {
         fpwr(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             config_address,
             EthercatRegister::SyncManager0 as u16,
             <&mut [u8]>::from(&mut context.slavelist[slave_usize].sync_manager[0]),
@@ -966,7 +1026,7 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
             .is_zero()
     {
         fpwr(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             config_address,
             EthercatRegister::SyncManager1 as u16,
             <&mut [u8]>::from(&mut context.slavelist[slave_usize].sync_manager[1]),
@@ -1006,7 +1066,7 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
                     )
                 };
             fpwr(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 config_address,
                 u16::from(EthercatRegister::SyncManager0)
                     + (sm_index * size_of::<SyncManager>()) as u16,
@@ -1034,6 +1094,10 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if:
+/// - The state of a slave couldn't be checked
+/// - A PDO map couldn't be parsed
 pub fn config_find_mappings(context: &mut Context, group: u8) -> Result<(), ConfigError> {
     // Find CANopen over EtherCAT and Servo over EtherCAT mapping of slaves in multiple threads
     for slave in 1..context.slave_count {
@@ -1047,13 +1111,17 @@ pub fn config_find_mappings(context: &mut Context, group: u8) -> Result<(), Conf
     // Find SII mapping of slave and program
     for slave in 1..context.slave_count {
         if group == 0 || group == context.slavelist[usize::from(slave)].group {
-            map_sii(context, slave);
+            map_sii(context, slave)?;
             map_sm(context, slave)?;
         }
     }
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if:
+/// - The mapping couldn't be send to the slave
+#[expect(clippy::missing_panics_doc)]
 pub fn config_create_input_mappings<'a, 'b: 'a>(
     context: &mut Context<'a>,
     io_map: &'b [u8],
@@ -1199,7 +1267,7 @@ pub fn config_create_input_mappings<'a, 'b: 'a>(
 
             // Program FMMU for input
             fpwr(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 config_address,
                 EthercatRegister::FieldbusMemoryManagementUnit0 as u16
                     + u16::from(fmmu_count) * size_of::<Fmmu>() as u16,
@@ -1220,7 +1288,7 @@ pub fn config_create_input_mappings<'a, 'b: 'a>(
                         context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)].log_start,
                     ) - context.grouplist[usize::from(group)].logical_start_address)
                         as usize..],
-                )
+                );
             } else {
                 context.slavelist[slave_usize].input = Some(
                     &io_map[ethercat_to_host(
@@ -1376,7 +1444,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
 
             // Program FMMU for output
             fpwr(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 config_address,
                 EthercatRegister::FieldbusMemoryManagementUnit0 as u16
                     + u16::from(fmmu_count) * size_of::<Fmmu>() as u16,
@@ -1404,7 +1472,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
                     &io_map[ethercat_to_host(
                         context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)].log_start,
                     ) as usize..],
-                )
+                );
             }
             context.slavelist[slave_usize].input_startbit =
                 context.slavelist[slave_usize].fmmu[usize::from(fmmu_count)].log_start_bit;
@@ -1555,13 +1623,13 @@ fn main_config_map_group<'context, 'io_map: 'context>(
                 }
 
                 // Set eeprom control to PDI
-                eeprom_to_pdi(context, slave);
+                context.eeprom_to_pdi(slave)?;
 
                 // User may override automatic state change
                 if !context.manual_state_change {
                     // Request safe operation for slave
                     fpwrw(
-                        &mut context.port.lock().unwrap(),
+                        &mut context.port,
                         config_address,
                         EthercatRegister::ApplicationLayerControl,
                         host_to_ethercat(u16::from(EthercatState::Operational)),
@@ -1628,6 +1696,9 @@ fn main_config_map_group<'context, 'io_map: 'context>(
 /// - `io_map`: IOmap
 /// - `group`: Group to map, 0 is all groups
 ///
+/// # Errors
+/// Returns an error if the main config map group couldn't be configured.
+///
 /// # Returns
 /// IOmap size or error
 pub fn config_map_group<'context, 'io_map: 'context>(
@@ -1645,6 +1716,9 @@ pub fn config_map_group<'context, 'io_map: 'context>(
 /// - `context`: Context struct
 /// - `io_map`: IOmap
 /// - `group`: Group to map, 0 = all groups
+///
+/// # Errors
+/// Returns an error if the main config map group couldn't be configured.
 ///
 /// # Returns
 /// IOmap size or error
@@ -1664,8 +1738,14 @@ pub fn config_map_group_aligned<'context, 'io_map: 'context>(
 /// - `io_map`: Pointer to IOmap
 /// - `group`: Group to map, 0 = all groups
 ///
+/// # Errors
+/// Errors if:
+/// - The config couldn't be send to a slave.
+/// - The slave couldn't be set to the safe operational state
+///
 /// # Returns
 /// IOmap size or error
+#[expect(clippy::similar_names)]
 pub fn config_overlap_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
     io_map: &'io_map mut [u8],
@@ -1749,13 +1829,13 @@ pub fn config_overlap_map_group<'context, 'io_map: 'context>(
                 }
 
                 // Set EEPROM control to PDI
-                eeprom_to_pdi(context, slave);
+                context.eeprom_to_pdi(slave)?;
 
                 // User may override automatic state change
                 if !context.manual_state_change {
                     // Request safe operation for slave
                     fpwrw(
-                        &mut context.port.lock().unwrap(),
+                        &mut context.port,
                         config_address,
                         EthercatRegister::ApplicationLayerControl,
                         host_to_ethercat(u16::from(EthercatState::SafeOperational)),
@@ -1825,6 +1905,11 @@ pub fn config_overlap_map_group<'context, 'io_map: 'context>(
 /// - `slave`: Slave to recover
 /// - `timeout`: local timeout f.e. `TIMEOUT_RETURN3`
 ///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Master couldn't take control of the eeprom
+///
 /// # Returns
 /// `Ok(())` or Error
 pub fn recover_slave(
@@ -1840,7 +1925,7 @@ pub fn recover_slave(
     let read_address: u16 = 0xFFFE;
     let mut word = read_address.to_ne_bytes();
     aprd(
-        &mut context.port.lock().unwrap(),
+        &mut context.port,
         address_ph,
         EthercatRegister::StaDr.into(),
         &mut word,
@@ -1857,7 +1942,7 @@ pub fn recover_slave(
     if read_address == 0 {
         // Clear possible slaves at `TEMP_NODE`.
         fpwrw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             TEMP_NODE,
             EthercatRegister::StaDr,
             host_to_ethercat(0),
@@ -1866,7 +1951,7 @@ pub fn recover_slave(
 
         // Set temporary node address of slave
         if apwrw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             address_ph,
             EthercatRegister::StaDr,
             host_to_ethercat(TEMP_NODE),
@@ -1875,7 +1960,7 @@ pub fn recover_slave(
         .is_err()
         {
             fpwrw(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 TEMP_NODE,
                 EthercatRegister::StaDr,
                 host_to_ethercat(0),
@@ -1888,28 +1973,24 @@ pub fn recover_slave(
         context.slavelist[slave_usize].config_address = TEMP_NODE;
 
         // Set eeprom control to master
-        eeprom_to_master(context, slave);
+        context.eeprom_to_master(slave)?;
 
         // Check if slave is the same as configured before
         if fprdw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             TEMP_NODE,
             EthercatRegister::Alias,
             timeout,
         )? == host_to_ethercat(context.slavelist[slave_usize].alias_address)
-            && read_eeprom(context, slave, SiiGeneralItem::Id.into(), TIMEOUT_EEP)
+            && context.read_eeprom(slave, SiiGeneralItem::Id.into(), TIMEOUT_EEP)?
                 == host_to_ethercat(context.slavelist[slave_usize].eep_id)
-            && read_eeprom(
-                context,
-                slave,
-                SiiGeneralItem::Manufacturer.into(),
-                TIMEOUT_EEP,
-            ) == host_to_ethercat(context.slavelist[slave_usize].eep_manufacturer)
-            && read_eeprom(context, slave, SiiGeneralItem::Revision.into(), TIMEOUT_EEP)
+            && context.read_eeprom(slave, SiiGeneralItem::Manufacturer.into(), TIMEOUT_EEP)?
+                == host_to_ethercat(context.slavelist[slave_usize].eep_manufacturer)
+            && context.read_eeprom(slave, SiiGeneralItem::Revision.into(), TIMEOUT_EEP)?
                 == host_to_ethercat(context.slavelist[slave_usize].eep_revision)
         {
             fpwrw(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 TEMP_NODE,
                 EthercatRegister::StaDr,
                 host_to_ethercat(config_address),
@@ -1919,7 +2000,7 @@ pub fn recover_slave(
         } else {
             // Slave is not the expected one, remove config address
             fpwrw(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 TEMP_NODE,
                 EthercatRegister::StaDr,
                 host_to_ethercat(0),
@@ -1939,6 +2020,13 @@ pub fn recover_slave(
 /// - `slave`: Slave to reconfigure
 /// - `timeout`: Local timeout f.e. `TIMEOUT_RETURN3`
 ///
+/// # Errors
+/// Returns an error if:
+/// - If the application layer couldn't be set to an ethercat state
+/// - The master couldn't take control of the eeprom
+/// - A message couldn't be send/received
+/// - The slave state couldn't be checked
+///
 /// # Returns
 /// slave state or error
 pub fn reconfig_slave(
@@ -1949,7 +2037,7 @@ pub fn reconfig_slave(
     let slave_usize = usize::from(slave);
     let config_address = context.slavelist[slave_usize].config_address;
     fpwrw(
-        &mut context.port.lock().unwrap(),
+        &mut context.port,
         config_address,
         EthercatRegister::ApplicationLayerControl,
         host_to_ethercat(EthercatState::Init.into()),
@@ -1957,10 +2045,10 @@ pub fn reconfig_slave(
     )?;
 
     // Set EEPROM to PDI
-    eeprom_to_pdi(context, slave);
+    context.eeprom_to_pdi(slave)?;
 
     // Check state change init
-    let mut state = statecheck(context, slave, EthercatState::Init, TIMEOUT_STATE);
+    let mut state = context.check_state(slave, EthercatState::Init, TIMEOUT_STATE)?;
     if state == EthercatState::Init.into() {
         // Program all enabled Sync Managers
         for sm_index in 0..MAX_SM {
@@ -1969,7 +2057,7 @@ pub fn reconfig_slave(
                 .is_zero()
             {
                 fpwr(
-                    &mut context.port.lock().unwrap(),
+                    &mut context.port,
                     config_address,
                     u16::from(EthercatRegister::SyncManager0)
                         + u16::from(sm_index) * size_of::<SyncManager>() as u16,
@@ -1981,7 +2069,7 @@ pub fn reconfig_slave(
             }
         }
         fpwrw(
-            &mut context.port.lock().unwrap(),
+            &mut context.port,
             config_address,
             EthercatRegister::ApplicationLayerControl,
             host_to_ethercat(EthercatState::PreOperational.into()),
@@ -1989,7 +2077,7 @@ pub fn reconfig_slave(
         )?;
 
         // Check state change pre-operational
-        if statecheck(context, slave, EthercatState::PreOperational, TIMEOUT_STATE)
+        if context.check_state(slave, EthercatState::PreOperational, TIMEOUT_STATE)?
             == EthercatState::PreOperational.into()
         {
             // Execute special slave configuration hook pre-operational to safe-operational
@@ -2006,7 +2094,7 @@ pub fn reconfig_slave(
 
             // Set safe operational status
             fpwrw(
-                &mut context.port.lock().unwrap(),
+                &mut context.port,
                 config_address,
                 EthercatRegister::ApplicationLayerControl,
                 host_to_ethercat(EthercatState::SafeOperational.into()),
@@ -2014,17 +2102,12 @@ pub fn reconfig_slave(
             )?;
 
             // Check state change safe operational
-            state = statecheck(
-                context,
-                slave,
-                EthercatState::SafeOperational,
-                TIMEOUT_STATE,
-            );
+            state = context.check_state(slave, EthercatState::SafeOperational, TIMEOUT_STATE)?;
 
             // Program configured FMMU
             for fmmu_count in 0..context.slavelist[slave_usize].fmmu_unused {
                 fpwr(
-                    &mut context.port.lock().unwrap(),
+                    &mut context.port,
                     config_address,
                     u16::from(EthercatRegister::FieldbusMemoryManagementUnit0)
                         + size_of::<Fmmu>() as u16 * u16::from(fmmu_count),

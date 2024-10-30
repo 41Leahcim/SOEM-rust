@@ -102,7 +102,7 @@ impl PacketData {
 
 /// File over Ethercat data
 #[derive(Default)]
-struct FoE {
+struct FileOverEthercat {
     mailbox_header: MailboxHeader,
     opcode: FileOverEthercatOpcode,
     reserved: u8,
@@ -110,8 +110,8 @@ struct FoE {
     packet_data: PacketData,
 }
 
-impl FoE {
-    pub fn read_from<R: Read>(reader: &mut R) -> Result<FoE, FoEError> {
+impl FileOverEthercat {
+    pub fn read_from<R: Read>(reader: &mut R) -> Result<Self, FoEError> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
         let mut buffer = [0; size_of::<[u8; MAX_FOE_DATA]>()];
         reader.read_exact(&mut buffer[..1])?;
@@ -119,9 +119,9 @@ impl FoE {
         reader.read_exact(&mut buffer[..1])?;
         let reserved = buffer[0];
         reader.read_exact(&mut buffer[..size_of::<u32>()])?;
-        let packet_info = PacketInfo::PacketNumber(Ethercat::from_raw(u32::from_ne_bytes(
+        let packet_info = PacketInfo::PacketNumber(Ethercat::<u32>::from_bytes(
             buffer[..size_of::<u32>()].try_into().unwrap(),
-        )));
+        ));
         reader.read_exact(&mut buffer)?;
         let packet_data = PacketData::Data(heapless::Vec::from_slice(&buffer).unwrap());
         Ok(Self {
@@ -161,8 +161,17 @@ pub fn define_hook(context: &mut Context, hook: fn(u16, i32, i32) -> i32) {
 /// `buffer`: File buffer
 /// `timeout`: Timeout per mailbox cycle, standard is `TIMEOUT_RX_MAILBOX`
 ///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Received data couldn't be parsed into a FileOverEthercat struct
+/// - The file over Ethercat buffer is too small
+/// - An error packet was received
+/// - An invalid packet was received
+///
 /// # Returns
 /// `Ok(())` or Error
+#[expect(clippy::missing_panics_doc)]
 pub fn foe_read(
     context: &mut Context,
     slave: u16,
@@ -177,7 +186,7 @@ pub fn foe_read(
     // Empty slave out mailbox if something is in it, timeout set to 0.
     mailbox_in.receive(context, slave, Duration::default())?;
 
-    let mut foe = FoE::default();
+    let mut foe = FileOverEthercat::default();
     let max_data = usize::from(context.slavelist[usize::from(slave)].mailbox_length - 12);
 
     // Limit the size of the filename to `MAX_FOE_DATA` or `max_data`
@@ -221,53 +230,50 @@ pub fn foe_read(
         mailbox_in.receive(context, slave, timeout)?;
 
         // Slave response should be File over Ethercat
-        let a_foe = FoE::read_from(&mut mailbox_in)?;
-        if a_foe.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::FileOverEthercat) {
-            // Slave response should be a data response File over Ethercat
-            if a_foe.opcode == FileOverEthercatOpcode::Data {
+        let a_foe = FileOverEthercat::read_from(&mut mailbox_in)?;
+        if a_foe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::FileOverEthercat) {
+            return Err(ErrorType::PacketError.into());
+        }
+        // Slave response should be a data response File over Ethercat
+        match a_foe.opcode {
+            FileOverEthercatOpcode::Data => {
                 let segment_data = ethercat_to_host(a_foe.mailbox_header.length) - 6;
                 let packetnumber = ethercat_to_host(a_foe.packet_info.inner());
                 previous_packet += 1;
-                if packetnumber == previous_packet
-                    && usize::from(data_read + segment_data) <= buffer.len()
+                if packetnumber != previous_packet
+                    || usize::from(data_read + segment_data) <= buffer.len()
                 {
-                    buffer[usize::from(data_read)..].copy_from_slice(
-                        &a_foe.packet_data.as_bytes()[..usize::from(segment_data)],
-                    );
-                    data_read += segment_data;
-                    if usize::from(segment_data) == max_data {
-                        work_to_do = true;
-                    }
-                    foe.mailbox_header.length = host_to_ethercat(6);
-                    foe.mailbox_header.address = host_to_ethercat(0);
-                    foe.mailbox_header.priority = 0;
-
-                    // Get new mailbox count value
-                    {
-                        let slave = &mut context.slavelist[usize::from(slave)];
-                        let count = next_mailbox_count(slave.mailbox_count);
-                        slave.mailbox_count = next_mailbox_count(count);
-                        foe.mailbox_header.mailbox_type = u8::from(MailboxType::FileOverEthercat)
-                            + mailbox_header_set_count(count);
-                    }
-                    foe.opcode = FileOverEthercatOpcode::Ack;
-                    foe.packet_info = PacketInfo::PacketNumber(host_to_ethercat(packetnumber));
-                    mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
-                    if let Some(file_over_ethercat_hook) = context.file_over_ethercat_hook {
-                        file_over_ethercat_hook(slave, packetnumber as i32, data_read as i32);
-                    }
-                } else {
                     return Err(ErrorType::FileOverEthernetBufferTooSmall.into());
                 }
-            } else if a_foe.opcode == FileOverEthercatOpcode::Error {
-                return Err(ErrorType::FileOverEthercatError.into());
-            } else {
-                return Err(ErrorType::PacketError.into());
+                buffer[usize::from(data_read)..]
+                    .copy_from_slice(&a_foe.packet_data.as_bytes()[..usize::from(segment_data)]);
+                data_read += segment_data;
+                if usize::from(segment_data) == max_data {
+                    work_to_do = true;
+                }
+                foe.mailbox_header.length = host_to_ethercat(6);
+                foe.mailbox_header.address = host_to_ethercat(0);
+                foe.mailbox_header.priority = 0;
+
+                // Get new mailbox count value
+                {
+                    let slave = &mut context.slavelist[usize::from(slave)];
+                    let count = next_mailbox_count(slave.mailbox_count);
+                    slave.mailbox_count = next_mailbox_count(count);
+                    foe.mailbox_header.mailbox_type =
+                        u8::from(MailboxType::FileOverEthercat) + mailbox_header_set_count(count);
+                }
+                foe.opcode = FileOverEthercatOpcode::Ack;
+                foe.packet_info = PacketInfo::PacketNumber(host_to_ethercat(packetnumber));
+                mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
+                if let Some(file_over_ethercat_hook) = context.file_over_ethercat_hook {
+                    file_over_ethercat_hook(slave, packetnumber as i32, i32::from(data_read));
+                }
             }
-            *size = usize::from(data_read);
-        } else {
-            return Err(ErrorType::PacketError.into());
+            FileOverEthercatOpcode::Error => return Err(ErrorType::FileOverEthercatError.into()),
+            _ => return Err(ErrorType::PacketError.into()),
         }
+        *size = usize::from(data_read);
 
         if !work_to_do {
             break;
@@ -285,6 +291,15 @@ pub fn foe_read(
 /// `password`: Password
 /// `buffer`: File buffer
 /// `timeout`: Timeout per mailbox cycle, standard is `TIMEOUT_RX_MAILBOX`
+///
+/// # Panics
+/// Panics if the received data is larger than the maximum packet data size.
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - The wrong packet type was received
+/// - An error packet was received
 ///
 /// # Returns
 /// `Ok(())` or error
@@ -307,7 +322,7 @@ pub fn foe_write(
         .find(|&length| file_name.get(..length).is_some())
         .unwrap_or_default()];
 
-    let mut foe = FoE::default();
+    let mut foe = FileOverEthercat::default();
     foe.mailbox_header.length = host_to_ethercat(6 + file_name.len() as u16);
     foe.mailbox_header.address = host_to_ethercat(0);
     foe.mailbox_header.priority = 0;
@@ -342,86 +357,79 @@ pub fn foe_write(
 
         // Read slave response
         mailbox_in.receive(context, slave, timeout)?;
-        let a_foe = FoE::read_from(&mut mailbox_in)?;
-        if a_foe.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::FileOverEthercat) {
-            match a_foe.opcode {
-                FileOverEthercatOpcode::Ack => {
-                    let packet_number = ethercat_to_host(a_foe.packet_info.inner());
-                    if packet_number == send_packet {
-                        if let Some(file_over_ethercat_hook) = context.file_over_ethercat_hook {
-                            file_over_ethercat_hook(
-                                slave,
-                                packet_number as i32,
-                                (buffer.len() - buffer_start) as i32,
-                            );
-                        }
-                        let tsize = (buffer.len() - buffer_start).min(max_data).min(max_data);
-
-                        if tsize != 0 || do_final_zero {
-                            work_to_do = true;
-                            do_final_zero = false;
-                            segment_data = tsize;
-
-                            // If last packet was full size, add a zero size packet as final
-                            // End of File is defined as packetsize < full packetsize
-                            if buffer.len() - segment_data - buffer_start == 0
-                                && segment_data == max_data
-                            {
-                                do_final_zero = true;
-                            }
-                            foe.mailbox_header.length = host_to_ethercat(6 + segment_data as u16);
-                            foe.mailbox_header.address = host_to_ethercat(0);
-                            foe.mailbox_header.priority = 0;
-
-                            // Get new mailbox count value
-                            {
-                                let slave = &mut context.slavelist[usize::from(slave)];
-                                let count = next_mailbox_count(slave.mailbox_count);
-                                foe.mailbox_header.mailbox_type =
-                                    u8::from(MailboxType::FileOverEthercat)
-                                        + mailbox_header_set_count(count);
-                            }
-                            foe.opcode = FileOverEthercatOpcode::Data;
-                            send_packet += 1;
-                            foe.packet_info =
-                                PacketInfo::PacketNumber(host_to_ethercat(send_packet));
-                            foe.packet_data = PacketData::Data(
-                                heapless::Vec::from_slice(
-                                    &buffer[buffer_start..buffer_start + segment_data],
-                                )
-                                .unwrap(),
-                            );
-                            buffer_start += segment_data;
-
-                            mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
-                        }
-                    } else {
-                        return Err(ErrorType::PacketNumber.into());
-                    }
-                }
-                FileOverEthercatOpcode::Busy => {
-                    // Resend if data has been send before, otherwise ignore.
-                    if send_packet != 0 {
-                        if buffer.len() - buffer_start == 0 {
-                            do_final_zero = true;
-                        }
-                        buffer_start -= segment_data;
-                        send_packet -= 1;
-                    }
-                }
-                FileOverEthercatOpcode::Error => {
-                    if ethercat_to_host(a_foe.packet_info.inner()) == 0x8001 {
-                        return Err(ErrorType::FileOverEthernetFileNotFoundError.into());
-                    } else {
-                        return Err(ErrorType::FileOverEthercatError.into());
-                    }
-                }
-                FileOverEthercatOpcode::Read
-                | FileOverEthercatOpcode::Write
-                | FileOverEthercatOpcode::Data => return Err(ErrorType::PacketError.into()),
-            }
-        } else {
+        let a_foe = FileOverEthercat::read_from(&mut mailbox_in)?;
+        if a_foe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::FileOverEthercat) {
             return Err(ErrorType::PacketError.into());
+        }
+        match a_foe.opcode {
+            FileOverEthercatOpcode::Ack => {
+                let packet_number = ethercat_to_host(a_foe.packet_info.inner());
+                if packet_number != send_packet {
+                    return Err(ErrorType::PacketNumber.into());
+                }
+                if let Some(file_over_ethercat_hook) = context.file_over_ethercat_hook {
+                    file_over_ethercat_hook(
+                        slave,
+                        packet_number as i32,
+                        (buffer.len() - buffer_start) as i32,
+                    );
+                }
+                let tsize = (buffer.len() - buffer_start).min(max_data);
+
+                if tsize != 0 || do_final_zero {
+                    work_to_do = true;
+                    do_final_zero = false;
+                    segment_data = tsize;
+
+                    // If last packet was full size, add a zero size packet as final
+                    // End of File is defined as packetsize < full packetsize
+                    if buffer.len() - segment_data - buffer_start == 0 && segment_data == max_data {
+                        do_final_zero = true;
+                    }
+                    foe.mailbox_header.length = host_to_ethercat(6 + segment_data as u16);
+                    foe.mailbox_header.address = host_to_ethercat(0);
+                    foe.mailbox_header.priority = 0;
+
+                    // Get new mailbox count value
+                    {
+                        let slave = &mut context.slavelist[usize::from(slave)];
+                        let count = next_mailbox_count(slave.mailbox_count);
+                        foe.mailbox_header.mailbox_type = u8::from(MailboxType::FileOverEthercat)
+                            + mailbox_header_set_count(count);
+                    }
+                    foe.opcode = FileOverEthercatOpcode::Data;
+                    send_packet += 1;
+                    foe.packet_info = PacketInfo::PacketNumber(host_to_ethercat(send_packet));
+                    foe.packet_data = PacketData::Data(
+                        heapless::Vec::from_slice(
+                            &buffer[buffer_start..buffer_start + segment_data],
+                        )
+                        .unwrap(),
+                    );
+                    buffer_start += segment_data;
+
+                    mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
+                }
+            }
+            FileOverEthercatOpcode::Busy => {
+                // Resend if data has been send before, otherwise ignore.
+                if send_packet != 0 {
+                    if buffer.len() - buffer_start == 0 {
+                        do_final_zero = true;
+                    }
+                    buffer_start -= segment_data;
+                    send_packet -= 1;
+                }
+            }
+            FileOverEthercatOpcode::Error => {
+                if ethercat_to_host(a_foe.packet_info.inner()) == 0x8001 {
+                    return Err(ErrorType::FileOverEthernetFileNotFoundError.into());
+                }
+                return Err(ErrorType::FileOverEthercatError.into());
+            }
+            FileOverEthercatOpcode::Read
+            | FileOverEthercatOpcode::Write
+            | FileOverEthercatOpcode::Data => return Err(ErrorType::PacketError.into()),
         }
 
         if !work_to_do {

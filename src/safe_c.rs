@@ -36,6 +36,14 @@ pub enum SocketError {
     InvalidError,
 }
 
+/// # Errors
+/// Returns an error if:
+/// - Permission to create the socket is denied
+/// - The specified address family is not supported
+/// - The requested protocol is not supported
+/// - The system reached the maximum number of open files/interfaces
+/// - There is not enough memory available for the socket to be created
+/// - An unknown error was stored in ERRNO
 pub fn socket(socket_family: i32, socket_type: i32, protocol: i32) -> Result<i32, SocketError> {
     match unsafe { libc::socket(socket_family, socket_type, protocol) } {
         -1 => match unsafe { *libc::__errno_location() } {
@@ -76,6 +84,14 @@ pub enum SockOptError {
     InvalidError,
 }
 
+/// # Errors
+/// Returns an error if:
+/// - The socket file descriptor is invalid
+/// - The address pointed to by value is not valid
+/// - The option_len is invalid or the value in optval is invalid
+/// - The protocol is invalid
+/// - The socket is a file, not a socket
+/// - An unknown error was stored in ERRNO
 pub fn setsockopt(
     socket: i32,
     level: i32,
@@ -90,8 +106,7 @@ pub fn setsockopt(
         EBADF => Err(SockOptError::BadFileDescriptor),
         EFAULT => Err(SockOptError::Fault),
         EINVAL => Err(SockOptError::InvalidValue),
-        ENOPROTOOPT => Err(SockOptError::NoProtoOpt),
-        ENOTSOCK => Err(SockOptError::NoProtoOpt),
+        ENOPROTOOPT | ENOTSOCK => Err(SockOptError::NoProtoOpt),
         _ => Err(SockOptError::InvalidError),
     }
 }
@@ -154,6 +169,13 @@ pub enum CloseError {
     InvalidError,
 }
 
+/// # Errors
+/// Returns an error if:
+/// - Fd isn't a valid open file descriptor
+/// - Close call was interrupted by a signal
+/// - An IO error occured
+/// - On NFS, the storage space was exceeded
+/// - An unknown error was stored in ERRNO
 pub fn close(fd: i32) -> Result<(), CloseError> {
     if unsafe { libc::close(fd) } == 0 {
         return Ok(());

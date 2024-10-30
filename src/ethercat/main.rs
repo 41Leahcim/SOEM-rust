@@ -7,14 +7,14 @@
 //! Needed for most user interaction with slaves.
 
 use std::{
-    any::Any,
     array,
     io::{self, Read, Write},
     str::Utf8Error,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
+    thread,
     time::{Duration, SystemTime},
 };
 
@@ -23,21 +23,25 @@ use heapless::String as HeaplessString;
 use oshw::nicdrv::{Port, RedPort};
 
 use super::{
-    base::brd,
+    base::{aprd, brd, bwr, fpwr, fpwrw},
     r#type::{
-        AbortError, ErrorInfo, ErrorType, Ethercat, EthercatState, SiiCategory, SiiGeneralItem,
-        MAX_BUF_COUNT, TIMEOUT_RETURN,
+        host_to_ethercat, AbortError, ErrorInfo, ErrorType, Ethercat, EthercatState, SiiCategory,
+        SiiGeneralItem, DEFAULT_RETRIES, EEPROM_STATE_MACHINE_BUSY, MAX_BUF_COUNT, TIMEOUT_RETURN,
     },
 };
 use crate::{
     ethercat::{
-        base::{add_datagram, setup_datagram},
+        base::{add_datagram, apwr, fprd, setup_datagram},
+        eoe::{eoe_header_frame_type_get, EoEFrameType, EthernetOverEthercat},
         r#type::{
-            ethercat_to_host, BufferState, CommandType, EthercatRegister, EthernetHeader,
-            ETHERCAT_HEADER_SIZE, ETHERCAT_WORK_COUNTER_SIZE, ETHERNET_HEADER_SIZE,
-            MAX_EEP_BUF_SIZE, SII_START, TIMEOUT_EEP, TIMEOUT_RET3,
+            ethercat_to_host, high_byte, high_word, low_word, BufferState, CommandType,
+            EepromCommand, EthercatRegister, EthernetHeader, MailboxType,
+            EEPROM_STATE_MACHINE_ERROR_MASK, EEPROM_STATE_MACHINE_ERROR_NACK,
+            EEPROM_STATE_MACHINE_READ64, ETHERCAT_HEADER_SIZE, ETHERCAT_WORK_COUNTER_SIZE,
+            ETHERNET_HEADER_SIZE, MAX_EEP_BUF_SIZE, SII_START, TIMEOUT_EEP, TIMEOUT_RET3,
         },
     },
+    osal::OsalTimer,
     oshw::{
         self, host_to_network,
         nicdrv::{NicdrvError, SECONDARY_MAC},
@@ -86,9 +90,19 @@ const MAX_FIXED_POINTER_READ_MULTI: usize = 64;
 pub enum MainError {
     Io(io::Error),
     Nicdrv(NicdrvError),
+    Utf8(Utf8Error),
     InvalidMailboxType(u8),
     InvalidCOEMailboxType(u8),
     InvalidEthercatState(u8),
+    SlaveIndexOutOfBounds(u16),
+    InvalidEepromAddress(u16),
+    SiiCategoryNotFound(SiiCategory),
+    MailboxFull,
+    NoMailboxFound,
+    SyncManagerIndexOutOfBounds,
+    MissedTooManyAcks,
+    EepromBusy,
+    NoIOFound,
 }
 
 impl From<io::Error> for MainError {
@@ -100,6 +114,12 @@ impl From<io::Error> for MainError {
 impl From<NicdrvError> for MainError {
     fn from(value: NicdrvError) -> Self {
         Self::Nicdrv(value)
+    }
+}
+
+impl From<Utf8Error> for MainError {
+    fn from(value: Utf8Error) -> Self {
+        Self::Utf8(value)
     }
 }
 
@@ -134,13 +154,13 @@ pub struct Fmmu {
     pub unused2: Ethercat<u16>,
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl NoUninit for Fmmu {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl Zeroable for Fmmu {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl AnyBitPattern for Fmmu {}
 
 impl<'fmmu> From<&'fmmu mut Fmmu> for &'fmmu mut [u8] {
@@ -156,13 +176,13 @@ pub struct SyncManager {
     pub sm_flags: Ethercat<u32>,
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl NoUninit for SyncManager {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl Zeroable for SyncManager {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl AnyBitPattern for SyncManager {}
 
 impl<'sm> From<&'sm mut SyncManager> for &'sm mut [u8] {
@@ -264,6 +284,17 @@ impl TryFrom<u8> for SyncManagerType {
 pub enum EepReadSize {
     Bytes4,
     Bytes8,
+}
+
+pub enum SlaveResponding {
+    SlaveResponds,
+    SlaveLost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EepromControl {
+    Master,
+    Pdi,
 }
 
 /// Detected EtherCAT slave
@@ -411,7 +442,7 @@ pub struct Slave<'slave> {
     pub eep_read_size: EepReadSize,
 
     /// False for eeprom to master, true for eeprom to PDI
-    pub eep_pdi: bool,
+    pub eep_pdi: EepromControl,
 
     pub canopen_over_ethercat_details: u8,
     pub file_over_ethercat_details: u8,
@@ -430,7 +461,7 @@ pub struct Slave<'slave> {
     pub fmmu_unused: u8,
 
     /// Whether the slave is responding, not used by the SOEM library
-    pub is_lost: bool,
+    pub is_lost: SlaveResponding,
 
     /// Registered configuration function PO -> SO (DEPRECATED)
     pub po2_so_config: Option<fn(slave: u16) -> i32>,
@@ -475,6 +506,8 @@ pub struct SlaveGroup<'io_map> {
     pub used_segment_count: u16,
 
     pub first_input_segment: u16,
+
+    /// Offset in input segment
     pub input_offset: u16,
 
     /// Expected workcounter outputs
@@ -515,28 +548,20 @@ impl<'io_map> Default for SlaveGroup<'io_map> {
 
 /// Record for Ethercat EEPROM communications
 pub struct Eeprom {
-    comm: u16,
+    command: EepromCommand,
     address: u16,
     d2: u16,
 }
 
-pub fn read_eeprom(
-    context: &mut Context,
-    slave: u16,
-    eeproma: u16,
-    timeout: Duration,
-) -> Ethercat<u32> {
-    todo!()
-}
-
-pub fn write_eeprom(
-    context: &mut Context,
-    slave: u16,
-    eeproma: u16,
-    data: u16,
-    timeout: Duration,
-) -> i32 {
-    todo!()
+impl Eeprom {
+    /// # Errors
+    /// Returns an error if the writer doesn't have enough capacity for the eeprom
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<usize> {
+        writer.write_all(&host_to_ethercat(self.command as u16).to_bytes())?;
+        writer.write_all(&host_to_ethercat(self.address).to_bytes())?;
+        writer.write_all(&host_to_ethercat(self.d2).to_bytes())?;
+        Ok(3 * size_of::<u16>())
+    }
 }
 
 /// Eeprom Fieldbus Memory Management Unit
@@ -554,9 +579,14 @@ impl EepromFmmu {
     /// `context`: Context struct
     /// `slave`: Slave number
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A byte couldn't be read from the EEPROM
+    /// - Control couldn't be returned to the PDI
+    ///
     /// # Returns
     /// FMMU struct from SII (maximum is 4 FMMU's)
-    pub fn sii_fmmu(context: &mut Context, slave: u16) -> Self {
+    pub fn sii_fmmu(context: &mut Context, slave: u16) -> Result<Self, MainError> {
         let slave_usize = usize::from(slave);
         let eeprom_control = context.slavelist[slave_usize].eep_pdi;
 
@@ -568,24 +598,24 @@ impl EepromFmmu {
 
         if start_position > 0 {
             let address = start_position;
-            number_fmmu = context.sii_get_byte(slave, address).unwrap() * 2;
-            fmmu[0] = context.sii_get_byte(slave, address + 2).unwrap();
-            fmmu[1] = context.sii_get_byte(slave, address + 3).unwrap();
+            number_fmmu = context.sii_get_byte(slave, address)? * 2;
+            fmmu[0] = context.sii_get_byte(slave, address + 2)?;
+            fmmu[1] = context.sii_get_byte(slave, address + 3)?;
             if number_fmmu > 2 {
-                fmmu[2] = context.sii_get_byte(slave, address + 4).unwrap();
-                fmmu[3] = context.sii_get_byte(slave, address + 5).unwrap();
+                fmmu[2] = context.sii_get_byte(slave, address + 4)?;
+                fmmu[3] = context.sii_get_byte(slave, address + 5)?;
             }
         }
 
         // If eeprom was previously pdi, then restore
-        if eeprom_control {
-            eeprom_to_pdi(context, slave);
+        if eeprom_control == EepromControl::Pdi {
+            context.eeprom_to_pdi(slave)?;
         }
-        Self {
+        Ok(Self {
             start_position,
             number_fmmu,
             fmmu,
-        }
+        })
     }
 }
 
@@ -613,37 +643,43 @@ impl EepromSyncManager {
     /// `context`: Context struct
     /// `slave`: Slave number
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The SyncManager SII category couldn't be found
+    /// - A byte couldn't be read from the eeprom
+    /// - Eeprom couldn't be returned to the PDI
+    ///
     /// # Returns
     /// First SyncManager struct from SII
-    pub fn sii_sm(context: &mut Context, slave: u16) -> Self {
+    pub fn sii_sm(context: &mut Context, slave: u16) -> Result<Self, MainError> {
         let eeprom_control = context.slavelist[usize::from(slave)].eep_pdi;
 
-        let start_position = context.sii_find(slave, SiiCategory::SM).unwrap();
+        let start_position = context.sii_find(slave, SiiCategory::SM)?;
         let sync_manager = if start_position > 0 {
             let address = start_position;
-            let w = u16::from(context.sii_get_byte(slave, address).unwrap())
-                + (u16::from(context.sii_get_byte(slave, address + 1).unwrap()) << 8);
+            let w = u16::from(context.sii_get_byte(slave, address)?)
+                + (u16::from(context.sii_get_byte(slave, address + 1)?) << 8);
             Self {
                 sync_manager_count: (w / 4) as u8,
-                phase_start: u16::from(context.sii_get_byte(slave, address + 2).unwrap())
-                    + (u16::from(context.sii_get_byte(slave, address + 3).unwrap()) << 8),
-                phase_length: u16::from(context.sii_get_byte(slave, address + 4).unwrap())
-                    + (u16::from(context.sii_get_byte(slave, address + 5).unwrap()) << 8),
-                control_register: context.sii_get_byte(slave, address + 6).unwrap(),
+                phase_start: u16::from(context.sii_get_byte(slave, address + 2)?)
+                    + (u16::from(context.sii_get_byte(slave, address + 3)?) << 8),
+                phase_length: u16::from(context.sii_get_byte(slave, address + 4)?)
+                    + (u16::from(context.sii_get_byte(slave, address + 5)?) << 8),
+                control_register: context.sii_get_byte(slave, address + 6)?,
                 start_position,
-                slave_register: context.sii_get_byte(slave, address + 7).unwrap(),
-                activate: context.sii_get_byte(slave, address + 8).unwrap(),
-                process_data_interface_control: context.sii_get_byte(slave, address + 9).unwrap(),
+                slave_register: context.sii_get_byte(slave, address + 7)?,
+                activate: context.sii_get_byte(slave, address + 8)?,
+                process_data_interface_control: context.sii_get_byte(slave, address + 9)?,
             }
         } else {
             Self::default()
         };
 
         // If eeprom control was previously pdi, restore it
-        if eeprom_control {
-            eeprom_to_pdi(context, slave);
+        if eeprom_control == EepromControl::Pdi {
+            context.eeprom_to_pdi(slave)?;
         }
-        sync_manager
+        Ok(sync_manager)
     }
 
     /// Get next SyncManager data from SII SyncManager section in slave EEPROM.
@@ -654,6 +690,12 @@ impl EepromSyncManager {
     /// `slave`: Slave number
     /// `number`: Sync manager number
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A byte couldn't be read from the EEPROM
+    /// - The requested sync manager index is too high
+    /// - Control over the EEPROM couldn't be returned to the PDI
+    ///
     /// # Returns
     /// Requested Eeprom SyncManager if available
     pub fn sii_sm_next(
@@ -661,31 +703,30 @@ impl EepromSyncManager {
         context: &mut Context,
         slave: u16,
         index: u8,
-    ) -> Option<EepromSyncManager> {
+    ) -> Result<EepromSyncManager, MainError> {
         let eeprom_control = context.slavelist[usize::from(slave)].eep_pdi;
-        let sync_manager = if index < self.sync_manager_count {
-            let address = self.start_position + 2 + u16::from(index) * 8;
-            Some(Self {
-                phase_start: u16::from(context.sii_get_byte(slave, address).unwrap())
-                    + (u16::from(context.sii_get_byte(slave, address + 1).unwrap()) << 8),
-                phase_length: u16::from(context.sii_get_byte(slave, address + 2).unwrap())
-                    + (u16::from(context.sii_get_byte(slave, address + 3).unwrap()) << 8),
-                control_register: context.sii_get_byte(slave, address + 4).unwrap(),
-                slave_register: context.sii_get_byte(slave, address + 5).unwrap(),
-                activate: context.sii_get_byte(slave, address + 6).unwrap(),
-                process_data_interface_control: context.sii_get_byte(slave, address + 7).unwrap(),
-                start_position: self.start_position,
-                sync_manager_count: self.sync_manager_count,
-            })
-        } else {
-            None
+        if index >= self.sync_manager_count {
+            return Err(MainError::SyncManagerIndexOutOfBounds);
+        }
+        let address = self.start_position + 2 + u16::from(index) * 8;
+        let sync_manager = Self {
+            phase_start: u16::from(context.sii_get_byte(slave, address)?)
+                + (u16::from(context.sii_get_byte(slave, address + 1)?) << 8),
+            phase_length: u16::from(context.sii_get_byte(slave, address + 2)?)
+                + (u16::from(context.sii_get_byte(slave, address + 3)?) << 8),
+            control_register: context.sii_get_byte(slave, address + 4)?,
+            slave_register: context.sii_get_byte(slave, address + 5)?,
+            activate: context.sii_get_byte(slave, address + 6)?,
+            process_data_interface_control: context.sii_get_byte(slave, address + 7)?,
+            start_position: self.start_position,
+            sync_manager_count: self.sync_manager_count,
         };
 
         // If eeprom control was previously pdi then restore
-        if eeprom_control {
-            eeprom_to_pdi(context, slave);
+        if eeprom_control == EepromControl::Pdi {
+            context.eeprom_to_pdi(slave)?;
         }
-        sync_manager
+        Ok(sync_manager)
     }
 }
 
@@ -723,9 +764,19 @@ impl EepromPdo {
     /// `slave`: Slave number
     /// `transmitting`: false=RXPDO, true=TXPDO
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The PDO send or PDO receive EEPROM category couldn't be found
+    /// - A byte from the eeprom couldn't be read
+    /// - EEPROM control couldn't be returned to PDI
+    ///
     /// # Returns
     /// Mapping size in bits of PDO and the Pdo struct from SII
-    pub fn sii_pdo(context: &mut Context, slave: u16, transmitting: bool) -> (u32, EepromPdo) {
+    pub fn sii_pdo(
+        context: &mut Context,
+        slave: u16,
+        transmitting: bool,
+    ) -> Result<(u32, EepromPdo), MainError> {
         let eeprom_control = context.slavelist[usize::from(slave)].eep_pdi;
         let mut size = 0;
         let mut pdo_count = 0;
@@ -734,7 +785,7 @@ impl EepromPdo {
         let mut sync_manager_bit_size = [0; MAX_SM as usize];
         let mut bit_size = [0; MAX_EE_PDO];
         let mut sync_manager = [0; MAX_EE_PDO];
-        let pdo = if let Some(start_position) = context.sii_find(
+        let pdo = if let Ok(start_position) = context.sii_find(
             slave,
             if transmitting {
                 SiiCategory::PDOSend
@@ -743,21 +794,20 @@ impl EepromPdo {
             },
         ) {
             let mut address = start_position;
-            length = u16::from(context.sii_get_byte(slave, address).unwrap())
-                + (u16::from(context.sii_get_byte(slave, address + 1).unwrap()) << 8);
+            length = u16::from(context.sii_get_byte(slave, address)?)
+                + (u16::from(context.sii_get_byte(slave, address + 1)?) << 8);
             let mut current = 1;
             address += 2;
 
             // Traverse through all PDOs
             loop {
                 pdo_count += 1;
-                index[usize::from(pdo_count)] =
-                    u16::from(context.sii_get_byte(slave, address).unwrap())
-                        + (u16::from(context.sii_get_byte(slave, address + 1).unwrap()) << 8);
+                index[usize::from(pdo_count)] = u16::from(context.sii_get_byte(slave, address)?)
+                    + (u16::from(context.sii_get_byte(slave, address + 1)?) << 8);
                 current += 1;
-                let e = u16::from(context.sii_get_byte(slave, address + 2).unwrap());
+                let e = u16::from(context.sii_get_byte(slave, address + 2)?);
                 sync_manager[usize::from(pdo_count)] =
-                    u16::from(context.sii_get_byte(slave, address + 3).unwrap());
+                    u16::from(context.sii_get_byte(slave, address + 3)?);
                 address += 8;
                 current += 2;
 
@@ -768,7 +818,7 @@ impl EepromPdo {
                         current += 4;
                         address += 5;
                         bit_size[usize::from(pdo_count)] +=
-                            u16::from(context.sii_get_byte(slave, address).unwrap());
+                            u16::from(context.sii_get_byte(slave, address)?);
                         address += 3;
                     }
                     sync_manager_bit_size[usize::from(sync_manager[usize::from(pdo_count)])] +=
@@ -791,8 +841,8 @@ impl EepromPdo {
                 }
             }
             Self {
-                length,
                 start_position,
+                length,
                 pdo_count,
                 index,
                 sync_manager,
@@ -801,69 +851,256 @@ impl EepromPdo {
             }
         } else {
             Self {
-                length,
-                index,
-                sync_manager_bit_size,
                 start_position: 0,
+                length,
                 pdo_count,
+                index,
                 sync_manager,
                 bit_size,
+                sync_manager_bit_size,
             }
         };
 
         // If eeprom control wa previously pdi, then restore
-        if eeprom_control {
-            eeprom_to_pdi(context, slave);
+        if eeprom_control == EepromControl::Pdi {
+            context.eeprom_to_pdi(slave)?;
         }
-        (size, pdo)
+        Ok((size, pdo))
     }
 }
 
 /// Mailbox error structure
 struct MailboxError {
     mailbox_header: MailboxHeader,
-    error_type: u16,
-    detail: u16,
+    error_type: Ethercat<u16>,
+    detail: Ethercat<u16>,
+}
+
+impl MailboxError {
+    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let mailbox_header = MailboxHeader::read_from(reader)?;
+        let mut word = [0; 2];
+        reader.read_exact(&mut word)?;
+        let error_type = Ethercat::<u16>::from_bytes(word);
+        reader.read_exact(&mut word)?;
+        let detail = Ethercat::<u16>::from_bytes(word);
+        Ok(Self {
+            mailbox_header,
+            error_type,
+            detail,
+        })
+    }
 }
 
 /// Mailbox buffer array
 #[derive(Debug)]
 pub struct MailboxIn {
     data: [u8; MAX_MAILBOX_SIZE],
-    read_index: usize,
+    length: usize,
 }
 
 impl Read for MailboxIn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.read_index <= MAX_MAILBOX_SIZE {
+        if self.length == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Mailbox is empty",
             ));
         }
-        buf.copy_from_slice(&self.data);
-        let written = buf.len().min(MAX_MAILBOX_SIZE - self.read_index);
-        self.read_index += written;
+        buf.copy_from_slice(&self.data[..self.length]);
+        let written = buf.len().min(self.length);
+        self.length -= written;
+        self.data.rotate_left(written);
         Ok(written)
     }
 }
 
 impl MailboxIn {
-    pub fn empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
-        todo!()
-    }
-
+    /// Clear mailbox buffer (sets size to 0)
+    ///
+    /// # Parameter
+    /// `self`: Mailbox to clear
     pub fn clear(&mut self) {
-        todo!()
+        self.length = 0;
     }
 
+    /// Read OUT mailbox of slave.
+    /// Supports mailbox link layer with repeat requests.
+    ///
+    /// # Parameters
+    /// `self`: Mailbox data
+    /// `context`: Context struct
+    /// `slave`: Slave number
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The slave doesn't have a mailbox
+    /// - Data couldn't be received from the slave.
+    /// - Received data couldn't be parsed into a `MailboxHeader`
+    /// - Received data couldn't be parsed into a `MailboxError`
+    /// - Received data couldn't be parsed into an `EmergencyRequest`
+    /// - Received data couldn't be parsed into a `EthernetOverEthercat` struct
+    ///
+    /// # Returns
+    /// Work counter (>0 if success)
     pub fn receive(
         &mut self,
         context: &mut Context,
         slave: u16,
         timeout: Duration,
     ) -> Result<u16, MainError> {
-        todo!()
+        let slave_usize = usize::from(slave);
+        let mailbox_length = context.slavelist[slave_usize].mailbox_read_length;
+
+        if !(0..=MAX_MAILBOX_SIZE).contains(&usize::from(mailbox_length)) {
+            return Err(MainError::NoMailboxFound);
+        }
+
+        let config_address = context.slavelist[slave_usize].config_address;
+        let timer = OsalTimer::new(timeout);
+
+        // Wait for read mailbox available
+        let (work_counter, sync_manager_status) = loop {
+            let mut word = [0; 2];
+            let work_counter = fprd(
+                &mut context.port,
+                config_address,
+                EthercatRegister::SyncManager1Status.into(),
+                &mut word,
+                TIMEOUT_RETURN,
+            )?;
+            let sync_manager_status = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+
+            if sync_manager_status & 8 == 0 && timeout > LOCAL_DELAY {
+                thread::sleep(LOCAL_DELAY);
+            }
+            if (work_counter == 0 && sync_manager_status & 8 == 0) || timer.is_expired() {
+                break (work_counter, sync_manager_status);
+            }
+        };
+
+        // If read mailbox is available
+        if work_counter > 0 && sync_manager_status & 8 > 0 {
+            let mailbox_read_offset = context.slavelist[slave_usize].mailbox_read_offset;
+            let mailbox_header = MailboxHeader::read_from(&mut self.data.as_slice())?;
+
+            loop {
+                // Get mailbox
+                let mut work_counter = fprd(
+                    &mut context.port,
+                    config_address,
+                    mailbox_read_offset,
+                    &mut self.data,
+                    TIMEOUT_RETURN,
+                )?;
+
+                // Mailbox error response
+                if work_counter > 0 && mailbox_header.mailbox_type.trailing_zeros() >= 4 {
+                    let mailbox_error = MailboxError::read_from(&mut self.data.as_slice())?;
+                    context.mailbox_error(slave, ethercat_to_host(mailbox_error.detail));
+
+                    // Prevent emergency to cascade up, it's already handled
+                    work_counter = 0;
+                } else if work_counter > 0
+                    && mailbox_header.mailbox_type & 0xF == MailboxType::CanopenOverEthercat.into()
+                {
+                    // If a CanOpen over EtherCAT response was received
+                    let emergency_request = EmergencyRequest::read_from(&mut self.data.as_slice())?;
+                    // Is it an emergency request
+                    if ethercat_to_host(emergency_request.can_open) >> 12 == 1 {
+                        context.mailbox_emergency_error(
+                            slave,
+                            ethercat_to_host(emergency_request.error_code),
+                            emergency_request.error_register,
+                            emergency_request.byte_data,
+                            ethercat_to_host(emergency_request.word1),
+                            ethercat_to_host(emergency_request.word2),
+                        );
+                        // Prevent emergency to cascade up, it's already handled
+                        work_counter = 0;
+                    }
+                } else if work_counter > 0
+                    && mailbox_header.mailbox_type & 0xF == MailboxType::EthernetOverEthercat.into()
+                {
+                    // Ethernet over EtherCAT response
+                    let eoe_mailbox = EthernetOverEthercat::read_from(&mut self.data.as_slice())?;
+                    let frame_info1 = ethercat_to_host(eoe_mailbox.frame_info1);
+
+                    // All non fragment data frame types are expected to be handled by slave
+                    // send/receive API if the Ethernet over EtherCAT hook is set.
+                    if eoe_header_frame_type_get(frame_info1 as u8)
+                        .is_ok_and(|frame_type| frame_type == EoEFrameType::FragmentData)
+                        && context.ethernet_over_ethercat_hook.is_some_and(|eoe_hook| {
+                            eoe_hook(context, slave, self.data.as_mut_slice()) != 0
+                        })
+                    {
+                        // Fragment handled by Ethernet over EtherCAT hook
+                        work_counter = 0;
+                    }
+                } else if work_counter == 0 {
+                    // Read mailbox lost
+                    let sync_manager_status = host_to_ethercat(sync_manager_status ^ 0x200);
+                    let mut word = sync_manager_status.to_bytes();
+                    fpwr(
+                        &mut context.port,
+                        config_address,
+                        EthercatRegister::SyncManager1Status.into(),
+                        &mut word,
+                        TIMEOUT_RETURN,
+                    )?;
+                    let sync_manager_status = Ethercat::<u16>::from_bytes(word);
+
+                    // Wait for toggle ack
+                    loop {
+                        let mut sync_manager_control = [0];
+                        let work_counter2 = fprd(
+                            &mut context.port,
+                            config_address,
+                            EthercatRegister::SyncManager1Control.into(),
+                            &mut sync_manager_control,
+                            TIMEOUT_RETURN,
+                        )?;
+                        if (work_counter2 > 0
+                            && sync_manager_control[0] & 2
+                                == high_byte(ethercat_to_host(sync_manager_status)) & 2)
+                            || timer.is_expired()
+                        {
+                            break;
+                        }
+                    }
+
+                    // Wait for read mailbox available
+                    loop {
+                        let mut word = sync_manager_status.to_bytes();
+                        let work_counter2 = fprd(
+                            &mut context.port,
+                            config_address,
+                            EthercatRegister::SyncManager1Status.into(),
+                            &mut word,
+                            TIMEOUT_RETURN,
+                        )?;
+                        let sync_manager_status =
+                            ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                        if sync_manager_status & 8 == 0 && timeout == LOCAL_DELAY {
+                            thread::sleep(LOCAL_DELAY);
+                        }
+                        if (work_counter2 > 0 && sync_manager_status & 8 == 0) || timer.is_expired()
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if work_counter > 0 || timer.is_expired() {
+                    break;
+                }
+            }
+        } else if work_counter > 0 {
+            // No read mailbox available
+            return Err(MainError::NoMailboxFound);
+        }
+        Ok(work_counter)
     }
 }
 
@@ -883,7 +1120,7 @@ impl Default for MailboxIn {
     fn default() -> Self {
         Self {
             data: [0; MAX_MAILBOX_SIZE],
-            read_index: 0,
+            length: 0,
         }
     }
 }
@@ -908,17 +1145,49 @@ impl Write for MailboxOut {
 }
 
 impl MailboxOut {
-    pub fn empty(context: &mut Context, slave: u16, timeout: Duration) -> i32 {
-        todo!()
-    }
-
+    /// Write to IN mailbox of slave.
+    ///
+    /// # Parameters
+    /// `self`: Mailbox data
+    /// `context`: Context struct
+    /// `slave`: Slave number
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - No mailbox was found for the slave
+    /// - The mailbox of the slave is already full
+    /// - Data couldn't be send
+    ///
+    /// # Returns
+    /// Work counter (> 0 if success)
     pub fn send(
         &mut self,
         context: &mut Context,
         slave: u16,
         timeout: Duration,
     ) -> Result<u16, MainError> {
-        todo!()
+        let slave_usize = usize::from(slave);
+        let mailbox_length = context.slavelist[slave_usize].mailbox_length;
+        if mailbox_length == 0 || usize::from(mailbox_length) > MAX_MAILBOX_SIZE {
+            return Err(MainError::NoMailboxFound);
+        }
+        let config_address = context.slavelist[slave_usize].config_address;
+        if !context.mailbox_empty(slave, timeout)? {
+            return Err(MainError::MailboxFull);
+        }
+
+        let mailbox_write_offset = context.slavelist[slave_usize].mailbox_write_offset;
+
+        // Write to slave in mailbox.
+        fpwr(
+            &mut context.port,
+            config_address,
+            mailbox_write_offset,
+            &mut self.data,
+            TIMEOUT_RET3,
+        )
+        .map_err(MainError::from)
     }
 }
 
@@ -957,29 +1226,39 @@ impl MailboxHeader {
         2 * size_of::<u16>() + 2 * size_of::<u8>()
     }
 
+    /// # Errors
+    /// Returns an error if:
+    /// - The writer doesn't have enough capacity for the `MailboxHeader`
     pub fn write_to(&self, bytes: &mut impl Write) -> io::Result<()> {
         bytes.write_all(&self.length.to_bytes())?;
         bytes.write_all(&self.address.to_bytes())?;
         bytes.write_all(&[self.priority, self.mailbox_type])
     }
 
-    pub fn read_from<R: Read>(bytes: &mut R) -> io::Result<Self> {
-        let mut value = [0; 6];
-        bytes.read_exact(&mut value)?;
+    /// # Errors
+    /// Returns an error if:
+    /// - The reader doesn't have enough data to create a `MailboxHeader`
+    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let mut word = [0; 2];
+        reader.read_exact(&mut word)?;
+        let length = Ethercat::<u16>::from_bytes(word);
+        reader.read_exact(&mut word)?;
+        let address = Ethercat::<u16>::from_bytes(word);
+        reader.read_exact(&mut word)?;
         Ok(Self {
-            length: Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap())),
-            address: Ethercat::from_raw(u16::from_ne_bytes(value[2..4].try_into().unwrap())),
-            priority: value[4],
-            mailbox_type: value[5],
+            length,
+            address,
+            priority: word[0],
+            mailbox_type: word[1],
         })
     }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ApplicationLayerStatus {
-    pub status: u16,
-    pub unused: u16,
-    pub code: u16,
+    pub status: Ethercat<u16>,
+    pub unused: Ethercat<u16>,
+    pub code: Ethercat<u16>,
 }
 
 unsafe impl NoUninit for ApplicationLayerStatus {}
@@ -988,21 +1267,24 @@ unsafe impl Zeroable for ApplicationLayerStatus {}
 
 unsafe impl AnyBitPattern for ApplicationLayerStatus {}
 
-impl<'status> From<&'status mut ApplicationLayerStatus> for &'status mut [u8] {
-    fn from(value: &'status mut ApplicationLayerStatus) -> Self {
-        bytemuck::bytes_of_mut(value)
+impl<'status> From<&'status ApplicationLayerStatus> for &'status [u8] {
+    fn from(value: &'status ApplicationLayerStatus) -> Self {
+        bytemuck::bytes_of(value)
     }
 }
 
 impl ApplicationLayerStatus {
+    /// # Errors
+    /// Returns an error if the reader doesn't have enough data to create the
+    /// `ApplicationLayerStatus`
     pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
         let mut word = [0; 2];
         reader.read_exact(&mut word)?;
-        let status = u16::from_ne_bytes(word);
+        let status = Ethercat::<u16>::from_bytes(word);
         reader.read_exact(&mut word)?;
-        let unused = u16::from_ne_bytes(word);
+        let unused = Ethercat::<u16>::from_bytes(word);
         reader.read_exact(&mut word)?;
-        let code = u16::from_ne_bytes(word);
+        let code = Ethercat::<u16>::from_bytes(word);
         Ok(Self {
             status,
             unused,
@@ -1016,9 +1298,50 @@ pub struct IndexStack {
     pub pushed: u8,
     pub pulled: u8,
     pub index: [u8; MAX_BUF_COUNT],
-    pub data: [Box<dyn Any>; MAX_BUF_COUNT],
-    pub length: [u16; MAX_BUF_COUNT],
+    pub data: [Vec<u8>; MAX_BUF_COUNT],
     pub dc_offset: [u16; MAX_BUF_COUNT],
+}
+
+impl IndexStack {
+    /// Push index of segmented logical read, logical write, logical read/write combination
+    ///
+    /// # Parameters
+    /// `self`: Index stack
+    /// `index`: Used datagram index
+    /// `data`: Process data segment
+    /// `dc_offset`: Offset position of DC frame
+    fn push_index(&mut self, index: u8, data: &[u8], dc_offset: u16) {
+        if usize::from(self.pushed) >= MAX_BUF_COUNT {
+            return;
+        }
+        let pushed_usize = usize::from(self.pushed);
+        self.index[pushed_usize] = index;
+        self.data[pushed_usize] = data.to_vec();
+        self.dc_offset[pushed_usize] = dc_offset;
+        self.pushed += 1;
+    }
+
+    /// Pull index of segmented logical read, logical write, logical read/write combination
+    /// `self`: Index stack
+    ///
+    /// # Returns stack location, None if empty
+    fn pull_index(&mut self) -> Option<u8> {
+        if self.pulled >= self.pushed {
+            return None;
+        }
+        let return_value = self.pulled;
+        self.pulled += 1;
+        Some(return_value)
+    }
+
+    /// Clear the index stack
+    ///
+    /// # Parameters
+    /// `self`: Index stack
+    fn clear_index(&mut self) {
+        self.pushed = 0;
+        self.pulled = 0;
+    }
 }
 
 /// Ringbuffer for error storage
@@ -1070,13 +1393,13 @@ pub struct PdoAssign {
     pub index: [u16; 256],
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl NoUninit for PdoAssign {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl Zeroable for PdoAssign {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl AnyBitPattern for PdoAssign {}
 
 impl<'pdo> From<&'pdo mut PdoAssign> for &'pdo mut [u8] {
@@ -1099,13 +1422,13 @@ pub struct PdoDescription {
     pub pdo: [u32; 256],
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl NoUninit for PdoDescription {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl Zeroable for PdoDescription {}
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl AnyBitPattern for PdoDescription {}
 
 impl<'pdo> From<&'pdo mut PdoDescription> for &'pdo mut [u8] {
@@ -1130,7 +1453,7 @@ pub enum PacketError {
 /// Context structure referenced by all Ethernet eXtended functions
 pub struct Context<'context> {
     /// Port reference may include red port
-    pub port: Arc<Mutex<Port<'context>>>,
+    pub port: Port<'context>,
 
     pub slavelist: Vec<Slave<'context>>,
 
@@ -1155,10 +1478,10 @@ pub struct Context<'context> {
     esislave: u16,
 
     /// Internal reference to error list
-    elist: &'context mut ErrorRing,
+    elist: ErrorRing,
 
     /// Internal reference to processdata stack buffer info
-    index_stack: &'context mut IndexStack,
+    index_stack: IndexStack,
 
     /// Reference to ecaterror state
     pub ecaterror: Arc<AtomicBool>,
@@ -1185,8 +1508,9 @@ pub struct Context<'context> {
     pub file_over_ethercat_hook: Option<fn(slave: u16, packetnumber: i32, datasize: i32) -> i32>,
 
     /// Registered Ethernet over ethercat hook
+    #[expect(clippy::type_complexity)]
     pub ethernet_over_ethercat_hook:
-        fn(context: &mut Context, slave: u16, ecembx: &mut [u8]) -> i32,
+        Option<fn(context: &mut Context, slave: u16, ecembx: &mut [u8]) -> i32>,
 
     /// Flag to control legacy automatic state change or manual state change
     pub manual_state_change: bool,
@@ -1203,10 +1527,13 @@ impl<'context> Context<'context> {
     /// - `self`: Context struct
     /// - `interface_name`: Device name, f.e. "eth0"
     ///
+    /// # Errors
+    /// Returns an error if the NIC couldn't be setup
+    ///
     /// # Returns
     /// `Ok(())` or error
     pub fn init(&mut self, interface_name: &str) -> Result<(), NicdrvError> {
-        self.port.lock().unwrap().setup_nic(interface_name, false)
+        self.port.setup_nic(interface_name, false)
     }
 
     /// Initialize library in redundant NIC mode
@@ -1217,6 +1544,16 @@ impl<'context> Context<'context> {
     /// - `interface_name`: Primary device name f.e. "etho"
     /// - `interface_name2`: Secondary device name, f.e. "eth1"
     ///
+    /// # Panics
+    /// Panics if:
+    /// - The `tx_buffer` couldn't be locked
+    /// - The `temp_tx_buffer` couldn't be locked
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The NIC couldn't be setup
+    /// - The `temp_tx_buffer` doesn't contain enoguh data to create an `EthernetHeader`
+    ///
     /// # Returns
     /// `Ok(())` or error
     pub fn init_redundant<'port: 'context>(
@@ -1225,9 +1562,9 @@ impl<'context> Context<'context> {
         interface_name: &str,
         interface_name2: &str,
     ) -> Result<(), NicdrvError> {
-        let mut port = self.port.lock().unwrap();
+        let port = &mut self.port;
         port.redport = Some(redport);
-        &mut port.setup_nic(interface_name, false)?;
+        port.setup_nic(interface_name, false)?;
         let rval = port.setup_nic(interface_name2, true);
 
         // Prepare "dummy" broadcat read tx frame for redundant operation
@@ -1238,14 +1575,14 @@ impl<'context> Context<'context> {
             .lock()
             .unwrap()
             .copy_from_slice(ethernet_header.as_ref());
-        let mut zbuf = [0; 2];
+        let zbuf = [0; 2];
         setup_datagram(
             &mut port.temp_tx_buffer.lock().unwrap(),
             CommandType::BroadcastRead,
             0,
             0,
             2,
-            &mut zbuf,
+            &zbuf,
         );
         port.temp_tx_buffer
             .lock()
@@ -1315,22 +1652,17 @@ impl<'context> Context<'context> {
     ///
     /// # Parameters
     /// - `self`: Context struct
+    ///
+    /// # Errors
+    /// Returns an error if the NIC sockets couldn't be closed
     pub fn close(&mut self) -> Result<(), crate::safe_c::CloseError> {
-        self.port.lock().unwrap().close_nic()
-    }
-
-    pub fn readstate(&mut self) -> i32 {
-        todo!()
-    }
-
-    pub fn writestate(&mut self) -> i32 {
-        todo!()
+        self.port.close_nic()
     }
 
     /// Report packet error
     ///
     /// # Parameters
-    /// - `context`: Context struct
+    /// - `self`: Context struct
     /// - `slave`: Slave number
     /// - `index`: Index that generated the error
     /// - `sub_index`: Subindex that generated the error
@@ -1411,60 +1743,63 @@ impl<'context> Context<'context> {
     /// - `slave`: Slave number
     /// - `address`: Eeprom address in bytes (slave uses words)
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The requested EEPROM address is invalid
+    /// - Control over the EEPROM couldn't be set to master
+    ///
     /// # Returns
     /// Requested byte or None
-    pub fn sii_get_byte(&mut self, slave: u16, address: u16) -> Option<u8> {
+    pub fn sii_get_byte(&mut self, slave: u16, address: u16) -> Result<u8, MainError> {
         // Make sure the selected slave is cached
         if slave != self.esislave {
             self.esimap.fill(0);
             self.esislave = slave;
         }
 
-        if address < MAX_EEP_BUF_SIZE {
-            let mapw = address >> 5;
-            let mut mapb = address - (mapw << 5);
-            if self.esimap[usize::from(mapw)] & (1 << mapb) != 0 {
-                // Byte is already in buffer
-                return Some(self.esibuf[usize::from(address)]);
-            } else {
-                // Byte is not in buffer, put it there
-                let config_address = self.slavelist[usize::from(slave)].config_address;
+        if address >= MAX_EEP_BUF_SIZE {
+            return Err(MainError::InvalidEepromAddress(address));
+        }
+        let mut mapword = address >> 5;
+        let mut mapbyte = address - (mapword << 5);
+        if self.esimap[usize::from(mapword)] & (1 << mapbyte) != 0 {
+            // Byte is already in buffer
+            return Ok(self.esibuf[usize::from(address)]);
+        }
+        // Byte is not in buffer, put it there
+        let config_address = self.slavelist[usize::from(slave)].config_address;
 
-                // Set eeprom cotrol to master
-                eeprom_to_master(self, slave);
-                let eeprom_address = address >> 1;
-                let eeprom_data64 =
-                    read_eeprom_fp(self, config_address, eeprom_address, TIMEOUT_EEP);
+        // Set eeprom cotrol to master
+        self.eeprom_to_master(slave)?;
+        let eeprom_address = address >> 1;
+        let eeprom_data64 = self.read_eeprom_fp(config_address, eeprom_address, TIMEOUT_EEP)?;
 
-                let count =
-                    if self.slavelist[usize::from(slave)].eep_read_size == EepReadSize::Bytes8 {
-                        // 8 byte response
-                        self.esibuf[usize::from(eeprom_address) << 1..]
-                            .copy_from_slice(&eeprom_data64.to_ne_bytes());
-                        8
-                    } else {
-                        // 4 byte response
-                        self.esibuf[usize::from(eeprom_address) << 1..]
-                            .copy_from_slice(&(eeprom_data64 as u32).to_ne_bytes());
-                        4
-                    };
+        let count = if self.slavelist[usize::from(slave)].eep_read_size == EepReadSize::Bytes8 {
+            // 8 byte response
+            self.esibuf[usize::from(eeprom_address) << 1..]
+                .copy_from_slice(&eeprom_data64.to_bytes());
+            8
+        } else {
+            // 4 byte response
+            self.esibuf[usize::from(eeprom_address) << 1..].copy_from_slice(
+                &host_to_ethercat(ethercat_to_host(eeprom_data64) as u32).to_bytes(),
+            );
+            4
+        };
 
-                // Find bitmap location
-                let mut mapw = eeprom_address >> 4;
-                mapb = (eeprom_address << 1) - (mapw << 5);
-                for _ in 0..count {
-                    // Set bitmap for each byte that is read
-                    self.esimap[usize::from(mapw)] |= 1 << mapb;
-                    mapb += 1;
-                    if mapb > 31 {
-                        mapb = 0;
-                        mapw += 1;
-                    }
-                }
-                return Some(self.esibuf[usize::from(address)]);
+        // Find bitmap location
+        mapword = eeprom_address >> 4;
+        mapbyte = (eeprom_address << 1) - (mapword << 5);
+        for _ in 0..count {
+            // Set bitmap for each byte that is read
+            self.esimap[usize::from(mapword)] |= 1 << mapbyte;
+            mapbyte += 1;
+            if mapbyte > 31 {
+                mapbyte = 0;
+                mapword += 1;
             }
         }
-        None
+        Ok(self.esibuf[usize::from(address)])
     }
 
     /// Find SII section header in slave EEPROM
@@ -1474,29 +1809,34 @@ impl<'context> Context<'context> {
     /// - `slave`: Slave number
     /// - `category`: Section category
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A byte couldn't be read from the EEPROM
+    /// - The requested SII category couldn't be found
+    ///
     /// # Returns
     /// byte address of section at section length entry, None if not available
-    pub fn sii_find(&mut self, slave: u16, category: SiiCategory) -> Option<u16> {
+    pub fn sii_find(&mut self, slave: u16, category: SiiCategory) -> Result<u16, MainError> {
         let slave_usize = usize::from(slave);
         let eeprom_control = self.slavelist[slave_usize].eep_pdi;
 
         let mut address = SII_START << 1;
 
         // Read first SII section category
-        let mut p = u16::from(self.sii_get_byte(slave, address).unwrap());
-        p += u16::from(self.sii_get_byte(slave, address + 1).unwrap()) << 8;
+        let mut p = u16::from(self.sii_get_byte(slave, address)?);
+        p += u16::from(self.sii_get_byte(slave, address + 1)?) << 8;
         address += 2;
 
         // Traverse SII while category is not found and not End Of File
         while p != u16::from(category) && p != 0xFFFF {
             // Read section length
             p = match self.sii_get_byte(slave, address) {
-                Some(byte) => u16::from(byte),
-                None => break,
+                Ok(byte) => u16::from(byte),
+                Err(_) => break,
             };
             p += match self.sii_get_byte(slave, address + 1) {
-                Some(byte) => u16::from(byte) << 8,
-                None => break,
+                Ok(byte) => u16::from(byte) << 8,
+                Err(_) => break,
             };
 
             // Locate next section category
@@ -1504,18 +1844,20 @@ impl<'context> Context<'context> {
 
             // Read section category
             p = match self.sii_get_byte(slave, address) {
-                Some(byte) => u16::from(byte),
-                None => break,
+                Ok(byte) => u16::from(byte),
+                Err(_) => break,
             };
             p += match self.sii_get_byte(slave, address + 1) {
-                Some(byte) => u16::from(byte) << 8,
-                None => break,
+                Ok(byte) => u16::from(byte) << 8,
+                Err(_) => break,
             }
         }
-        if eeprom_control {
-            eeprom_to_pdi(self, slave);
+        if eeprom_control == EepromControl::Pdi {
+            self.eeprom_to_pdi(slave)?;
         }
-        (p == u16::from(category)).then_some(p)
+        (p == u16::from(category))
+            .then_some(p)
+            .ok_or(MainError::SiiCategoryNotFound(category))
     }
 
     /// Get string from SII string section in slave EEPROM.
@@ -1525,17 +1867,26 @@ impl<'context> Context<'context> {
     /// `string`: Requested string
     /// `slave`: Slave number
     /// `string_number`: String number
+    ///
+    /// # Panics
+    /// Panics if a byte couldn't be added to the string
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A byte of the string couldn't be read
+    ///
+    /// # Returns
+    /// The resulting string or error
     pub fn sii_string<const SIZE: usize>(
         &mut self,
-        string: &mut heapless::String<SIZE>,
         slave: u16,
         string_number: u16,
-    ) -> Result<(), Utf8Error> {
+    ) -> Result<heapless::String<SIZE>, MainError> {
         let slave_usize = usize::from(slave);
         let eeprom_control = self.slavelist[slave_usize].eep_pdi;
 
         let mut result = heapless::Vec::<u8, SIZE>::new();
-        if let Some(address) = self.sii_find(slave, SiiCategory::String) {
+        if let Ok(address) = self.sii_find(slave, SiiCategory::String) {
             // Skip SII section header
             let mut address = address + 2;
 
@@ -1544,35 +1895,32 @@ impl<'context> Context<'context> {
             address += 1;
 
             // Check whether the requested string is available
-            if number.is_some_and(|number| string_number <= u16::from(number)) {
-                let mut i = 0;
-                while i < string_number {
-                    i += 1;
-                    let Some(length) = self.sii_get_byte(slave, address) else {
+            if number.is_ok_and(|number| string_number <= u16::from(number)) {
+                for i in 1..=string_number {
+                    let Ok(length) = self.sii_get_byte(slave, address) else {
                         continue;
                     };
                     if i < string_number {
                         address += u16::from(length);
-                    } else {
-                        for j in 1..=length {
-                            if u16::from(j) <= MAX_NAME_LENGTH {
-                                result.push(self.sii_get_byte(slave, address).unwrap());
-                                address += 1;
-                            } else {
-                                address += 1;
-                            }
+                        continue;
+                    }
+                    for j in 1..=length {
+                        if u16::from(j) > MAX_NAME_LENGTH {
+                            address += 1;
+                            continue;
                         }
+                        result.push(self.sii_get_byte(slave, address)?).unwrap();
+                        address += 1;
                     }
                 }
             }
         }
 
         // If eeprom control was previously pdi, then restore
-        if eeprom_control {
-            eeprom_to_pdi(self, slave);
+        if eeprom_control == EepromControl::Pdi {
+            self.eeprom_to_pdi(slave)?;
         }
-        *string = HeaplessString::from_utf8(result)?;
-        Ok(())
+        Ok(HeaplessString::from_utf8(result)?)
     }
 
     /// Read all slave states in `ec_slave`
@@ -1590,7 +1938,7 @@ impl<'context> Context<'context> {
         // This way, a number of datagrams equal to the number of slaves will be send when needed.
         let mut byte = [0];
         let wkc = brd(
-            &mut self.port.lock().unwrap(),
+            &mut self.port,
             0,
             EthercatRegister::ApplicationLayerStatus,
             &mut byte,
@@ -1599,7 +1947,7 @@ impl<'context> Context<'context> {
 
         let all_slaves_present = wkc >= self.slave_count;
 
-        let received_value = ethercat_to_host(Ethercat::from_raw(byte[0]));
+        let received_value = byte[0];
 
         let error_flag = if received_value & u8::from(EthercatState::Error) != 0 {
             false
@@ -1610,10 +1958,12 @@ impl<'context> Context<'context> {
 
         let bitwise_state = received_value & 0xF;
         let all_slaves_same_state = match EthercatState::try_from(bitwise_state) {
-            state @ (Ok(EthercatState::Init)
-            | Ok(EthercatState::PreOperational)
-            | Ok(EthercatState::SafeOperational)
-            | Ok(EthercatState::Operational)) => {
+            state @ Ok(
+                EthercatState::Init
+                | EthercatState::PreOperational
+                | EthercatState::SafeOperational
+                | EthercatState::Operational,
+            ) => {
                 self.slavelist[0].state = state.unwrap();
                 true
             }
@@ -1626,7 +1976,7 @@ impl<'context> Context<'context> {
             // have reached the same state. So the internal state can be
             // updated without sending any datagram.
             let state = self.slavelist[0].state;
-            for slave in self.slavelist[1..=usize::from(self.slave_count)].iter_mut() {
+            for slave in &mut self.slavelist[1..=usize::from(self.slave_count)] {
                 slave.al_status_code = 0;
                 slave.state = state;
             }
@@ -1649,9 +1999,9 @@ impl<'context> Context<'context> {
 
                 for slave in fslave..=lslave {
                     const ZERO: ApplicationLayerStatus = ApplicationLayerStatus {
-                        status: 0,
-                        unused: 0,
-                        code: 0,
+                        status: Ethercat::from_raw(0),
+                        unused: Ethercat::from_raw(0),
+                        code: Ethercat::from_raw(0),
                     };
                     let config_address = self.slavelist[usize::from(slave)].config_address;
                     slca[usize::from(slave - fslave)] = config_address;
@@ -1667,12 +2017,9 @@ impl<'context> Context<'context> {
                 )?;
 
                 for slave in fslave..=lslave {
-                    let config_address = self.slavelist[usize::from(slave)].config_address;
-                    let received_value = ethercat_to_host(Ethercat::from_raw(
-                        sl[usize::from(slave - fslave)].status,
-                    ));
+                    let received_value = ethercat_to_host(sl[usize::from(slave - fslave)].status);
                     self.slavelist[usize::from(slave)].al_status_code =
-                        ethercat_to_host(Ethercat::from_raw(sl[usize::from(slave - fslave)].code));
+                        ethercat_to_host(sl[usize::from(slave - fslave)].code);
                     lowest = lowest.min(received_value & 0xF);
                     self.slavelist[usize::from(slave)].state =
                         EthercatState::try_from(received_value as u8)?;
@@ -1692,6 +2039,1322 @@ impl<'context> Context<'context> {
 
         Ok(lowest)
     }
+
+    /// Write slave state, if slave = 0, write to all slaves.
+    /// The function doesn't check if the actual state is changed.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `slave`: Slave number, 0 = master
+    ///
+    /// # Errors
+    /// Returns an error if the state couldn't be send.
+    ///
+    /// # Returns
+    /// Workcounter or error
+    pub fn write_state(&mut self, slave: u16) -> Result<u16, NicdrvError> {
+        if slave == 0 {
+            let sl_state = host_to_ethercat(u16::from(self.slavelist[usize::from(slave)].state));
+            bwr(
+                &mut self.port,
+                0,
+                EthercatRegister::ApplicationLayerControl,
+                &mut sl_state.to_bytes(),
+                TIMEOUT_RET3,
+            )
+        } else {
+            let config_address = self.slavelist[usize::from(slave)].config_address;
+            fpwrw(
+                &mut self.port,
+                config_address,
+                EthercatRegister::ApplicationLayerControl,
+                host_to_ethercat(u16::from(self.slavelist[usize::from(slave)].state)),
+                TIMEOUT_RET3,
+            )
+        }
+    }
+
+    /// Check actual slave state.
+    /// This is a blocking function.
+    /// to refresh the state of all slaves `context::read_state()` should be called.
+    ///
+    /// # Warning
+    /// If this is used for slave 0 (=all slaves), the state of all slaves is read by a bitwise OR
+    /// operation.
+    /// The returned value is also the bitwise OR state of all slaves.
+    /// This has some implications for the boot state. The boot state representation collides with
+    /// INIT | PRE_OP so this function can't be used for slave= 0 and reqstate = STATE_BOOT and if
+    /// the returned state is boot, some slaves might actualy be in INIT and PRE_OP and not in BOOT.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `slave`: Slave number, 0 = all slaves (only the `slavelist[0].state` is refreshed)
+    /// `request_state`: Requested state
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - THe application layer status couldn't be read
+    /// - `ApplicationLayerStatus` couldn't be created from received data
+    ///
+    /// # Returns
+    /// Requested state or found state after timeout
+    pub fn check_state(
+        &mut self,
+        slave: u16,
+        request_state: EthercatState,
+        timeout: Duration,
+    ) -> Result<u16, MainError> {
+        if slave > self.slave_count {
+            return Err(MainError::SlaveIndexOutOfBounds(slave));
+        }
+        let timer = OsalTimer::new(timeout);
+
+        let slave_usize = usize::from(slave);
+        let config_address = self.slavelist[slave_usize].config_address;
+        let state;
+        (self.slavelist[slave_usize].state, state) = loop {
+            let rval = if slave < 1 {
+                let mut word = [0; 2];
+                brd(
+                    &mut self.port,
+                    0,
+                    EthercatRegister::ApplicationLayerStatus,
+                    &mut word,
+                    TIMEOUT_RETURN,
+                )?;
+                ethercat_to_host(Ethercat::<u16>::from_bytes(word))
+            } else {
+                let mut bytes = [0; 6];
+                fprd(
+                    &mut self.port,
+                    config_address,
+                    EthercatRegister::ApplicationLayerStatus.into(),
+                    &mut bytes,
+                    TIMEOUT_RETURN,
+                )?;
+                let slstat = ApplicationLayerStatus::read_from(&mut bytes.as_slice())?;
+                self.slavelist[slave_usize].al_status_code = ethercat_to_host(slstat.code);
+                ethercat_to_host(slstat.status)
+            };
+
+            // Read slave status
+            let state = rval & 0xF;
+
+            if state != request_state.into() {
+                thread::sleep(Duration::from_micros(1000));
+            }
+            if state == request_state.into() || timer.is_expired() {
+                break (EthercatState::try_from(rval as u8)?, state);
+            }
+        };
+
+        Ok(state)
+    }
+
+    /// Check if IN mailbox of slave is empty.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The status of sync manager 0 couldn't be read
+    ///
+    /// # Returns
+    /// Whether the mailbox was empty or error
+    pub fn mailbox_empty(&mut self, slave: u16, timeout: Duration) -> Result<bool, NicdrvError> {
+        let timer = OsalTimer::new(timeout);
+        let config_address = self.slavelist[usize::from(slave)].config_address;
+
+        let (wkc, sync_manager_status) = loop {
+            let mut byte = [0];
+            let wkc = fprd(
+                &mut self.port,
+                config_address,
+                EthercatRegister::SyncManager0Status.into(),
+                &mut byte,
+                TIMEOUT_RETURN,
+            )?;
+            let sync_manager_status = byte[0];
+            if sync_manager_status & 8 != 0 && timeout > LOCAL_DELAY {
+                thread::sleep(LOCAL_DELAY);
+            }
+            if (wkc != 0 && sync_manager_status & 8 != 0) || timer.is_expired() {
+                break (wkc, sync_manager_status);
+            }
+        };
+
+        Ok(wkc > 0 && sync_manager_status & 8 == 0)
+    }
+
+    /// Dump complete EEPROM data from slave in buffer.
+    ///
+    /// # Parameter
+    /// `self`: Context struct
+    /// `slave`: Slave number
+    /// `esibuf`: EEPROM data buffer, will stop reading early if not big enough
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Eeprom control couldn't be taken by master
+    /// - Eeprom control couldn't be returned to PDI
+    ///
+    /// # Returns
+    /// Amount of words (u16) read from eeprom
+    pub fn esi_dump(&mut self, slave: u16, esibuf: &mut [u8]) -> Result<usize, MainError> {
+        let slave_usize = usize::from(slave);
+        let eeprom_control = self.slavelist[slave_usize].eep_pdi;
+
+        // Set eeprom control to master
+        self.eeprom_to_master(slave)?;
+        let config_address = self.slavelist[slave_usize].config_address;
+        let increment = if self.slavelist[slave_usize].eep_read_size == EepReadSize::Bytes8 {
+            4
+        } else {
+            8
+        };
+
+        let mut last_p16 = 0;
+        for (p16, address) in (0..=(u32::MAX as usize)
+            .min(esibuf.len())
+            .saturating_sub(increment))
+            .zip(SII_START..MAX_EEP_BUF_SIZE >> 1)
+            .step_by(increment)
+        {
+            let edat = self.read_eeprom_fp(config_address, address, TIMEOUT_EEP)?;
+            esibuf[p16..p16 + increment].copy_from_slice(&edat.to_bytes());
+            last_p16 = p16;
+        }
+
+        // If eeprom control was previously PDI, then restore
+        if eeprom_control == EepromControl::Pdi {
+            self.eeprom_to_pdi(slave)?;
+        }
+        Ok(last_p16 + increment)
+    }
+
+    /// Read eeprom from skave bypassing cache.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `slave`: Slave number
+    /// `eeprom_address`: Address in the eeprom
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if the master couldn't take control over the EEPROM.
+    ///
+    /// # Returns
+    /// EEPROM data 32-bit
+    pub fn read_eeprom(
+        &mut self,
+        slave: u16,
+        eeprom_address: u16,
+        timeout: Duration,
+    ) -> Result<Ethercat<u32>, MainError> {
+        // Set eeprom control to master
+        self.eeprom_to_master(slave)?;
+        let config_address = self.slavelist[usize::from(slave)].config_address;
+        Ok(host_to_ethercat(ethercat_to_host(self.read_eeprom_fp(
+            config_address,
+            eeprom_address,
+            timeout,
+        )?) as u32))
+    }
+
+    /// Write EEPROM to slave bypassing cache.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `slave`: Slave number
+    /// `eeprom_address`: Address in the eeprom
+    /// `data`: 16-bit data
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if the master couldn't take control over the EEPROM.
+    ///
+    /// # Returns
+    /// > 0 if OK
+    pub fn write_eeprom(
+        &mut self,
+        slave: u16,
+        eeproma: u16,
+        data: Ethercat<u16>,
+        timeout: Duration,
+    ) -> Result<(), MainError> {
+        // Sets eeprom control to master
+        self.eeprom_to_master(slave)?;
+        let config_address = self.slavelist[usize::from(slave)].config_address;
+        self.write_eeprom_fp(config_address, eeproma, data, timeout)
+    }
+
+    /// Set eeprom control to master. Only if set to PDI.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `slave`: Slave numner
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The EEPROM control couldn't be forced from PDI
+    /// - EEPROM control couldn't be set to master
+    ///
+    /// # Returns
+    /// Ok(()) or error
+    pub fn eeprom_to_master(&mut self, slave: u16) -> Result<(), NicdrvError> {
+        let slave_usize = usize::from(slave);
+        if self.slavelist[slave_usize].eep_pdi == EepromControl::Master {
+            return Ok(());
+        }
+
+        let config_address = self.slavelist[slave_usize].config_address;
+
+        let mut eeprom_control = [2];
+        let mut error_counter = 0;
+
+        // Force eeprom from PDI
+        loop {
+            let Err(error) = fpwr(
+                &mut self.port,
+                config_address,
+                EthercatRegister::EepromConfig.into(),
+                &mut eeprom_control,
+                TIMEOUT_RETURN,
+            ) else {
+                break;
+            };
+            if error_counter < DEFAULT_RETRIES {
+                error_counter += 1;
+            } else {
+                return Err(error);
+            }
+        }
+
+        let mut eeprom_control = [0];
+        error_counter = 0;
+
+        // Set eeprom to master
+        loop {
+            let Err(error) = fpwr(
+                &mut self.port,
+                config_address,
+                EthercatRegister::EepromConfig.into(),
+                &mut eeprom_control,
+                TIMEOUT_RETURN,
+            ) else {
+                break;
+            };
+            if error_counter < DEFAULT_RETRIES {
+                error_counter += 1;
+            } else {
+                return Err(error);
+            }
+        }
+        self.slavelist[slave_usize].eep_pdi = EepromControl::Master;
+
+        Ok(())
+    }
+
+    /// Set eeprom control to PDI. Only if set to master.
+    ///
+    /// # Parameter
+    /// `context`: context struct
+    /// `slave`: Slave number
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Eeprom control couldn't be returned to the PDI
+    ///
+    /// # Returns
+    /// `Ok(())` or error
+    pub fn eeprom_to_pdi(&mut self, slave: u16) -> Result<(), NicdrvError> {
+        if self.slavelist[usize::from(slave)].eep_pdi == EepromControl::Pdi {
+            return Ok(());
+        }
+
+        let config_address = self.slavelist[usize::from(slave)].config_address;
+        let mut eep_control = [1];
+        let mut error_count = 0;
+        loop {
+            let Err(error) = fpwr(
+                &mut self.port,
+                config_address,
+                EthercatRegister::EepromConfig.into(),
+                &mut eep_control,
+                TIMEOUT_RETURN,
+            ) else {
+                break;
+            };
+            if error_count < DEFAULT_RETRIES {
+                error_count += 1;
+            } else {
+                return Err(error);
+            }
+        }
+        self.slavelist[usize::from(slave)].eep_pdi = EepromControl::Pdi;
+        Ok(())
+    }
+
+    fn eeprom_wait_not_busy_ap(
+        &mut self,
+        auto_increment_address: u16,
+        eeprom_state: &mut u16,
+        timeout: Duration,
+    ) -> Result<bool, NicdrvError> {
+        let timer = OsalTimer::new(timeout);
+        let mut counter = 0;
+        *eeprom_state = 0;
+        loop {
+            if counter != 0 {
+                counter += 1;
+            }
+            let mut word = [0; 2];
+            let Err(err) = aprd(
+                &mut self.port,
+                auto_increment_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut word,
+                TIMEOUT_RETURN,
+            ) else {
+                *eeprom_state = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                if *eeprom_state & EEPROM_STATE_MACHINE_BUSY != 0 || timer.is_expired() {
+                    return Ok(*eeprom_state & EEPROM_STATE_MACHINE_BUSY == 0);
+                }
+                continue;
+            };
+            if timer.is_expired() {
+                return Err(err);
+            }
+        }
+    }
+
+    /// Read eeprom from slave bypassing cache. APRD method.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `auto_increment_address`: Auto increment address of slave
+    /// `eeprom_address`: Address in the eeprom
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The eeprom is too busy
+    /// - Error bits couldn't be cleared
+    /// - Eeprom configuration couldn't be send
+    /// - Eeprom data couldn't be read
+    /// - No acknowledges were received from slave
+    ///
+    /// # Returns
+    /// EEPROM data 64-bit or 32-bit
+    pub fn read_eeprom_ap(
+        &mut self,
+        auto_inrecment_address: u16,
+        eeprom_address: u16,
+        timeout: Duration,
+    ) -> Result<Ethercat<u64>, MainError> {
+        let mut eeprom_state = 0;
+        if !self.eeprom_wait_not_busy_ap(auto_inrecment_address, &mut eeprom_state, timeout)? {
+            return Err(MainError::EepromBusy);
+        }
+        // If error bits are set
+        if eeprom_state & EEPROM_STATE_MACHINE_ERROR_MASK != 0 {
+            // Clear error bits
+            eeprom_state = EepromCommand::Nop.into();
+            apwr(
+                &mut self.port,
+                auto_inrecment_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut host_to_ethercat(eeprom_state).to_bytes(),
+                TIMEOUT_RET3,
+            )?;
+        }
+
+        let mut nack_count = 0;
+        loop {
+            let eeprom = Eeprom {
+                command: EepromCommand::Read,
+                address: eeprom_address,
+                d2: 0,
+            };
+            let mut eeprom_bytes = [0; 6];
+            eeprom.write_to(&mut eeprom_bytes.as_mut_slice())?;
+            let mut retry_count = 0;
+
+            loop {
+                let Err(err) = apwr(
+                    &mut self.port,
+                    auto_inrecment_address,
+                    EthercatRegister::EepromControlStat.into(),
+                    &mut eeprom_bytes,
+                    TIMEOUT_RETURN,
+                ) else {
+                    break;
+                };
+                if retry_count < DEFAULT_RETRIES {
+                    retry_count += 1;
+                } else {
+                    return Err(err.into());
+                }
+            }
+
+            thread::sleep(LOCAL_DELAY);
+            eeprom_state = 0;
+
+            if !self.eeprom_wait_not_busy_ap(auto_inrecment_address, &mut eeprom_state, timeout)? {
+                continue;
+            }
+            if eeprom_state & EEPROM_STATE_MACHINE_ERROR_NACK != 0 {
+                nack_count += 1;
+                thread::sleep(LOCAL_DELAY * 5);
+            } else {
+                retry_count = 0;
+                if eeprom_state & EEPROM_STATE_MACHINE_READ64 != 0 {
+                    let mut bytes = [0; 8];
+                    loop {
+                        let Err(error) = aprd(
+                            &mut self.port,
+                            auto_inrecment_address,
+                            EthercatRegister::EepromData.into(),
+                            &mut bytes,
+                            TIMEOUT_RETURN,
+                        ) else {
+                            return Ok(Ethercat::<u64>::from_bytes(bytes));
+                        };
+                        if retry_count < DEFAULT_RETRIES {
+                            retry_count += 1;
+                        } else {
+                            return Err(error.into());
+                        }
+                    }
+                } else {
+                    let mut bytes = [0; 4];
+                    loop {
+                        let Err(error) = aprd(
+                            &mut self.port,
+                            auto_inrecment_address,
+                            EthercatRegister::EepromData.into(),
+                            &mut bytes,
+                            TIMEOUT_RETURN,
+                        ) else {
+                            return Ok(host_to_ethercat(u64::from(ethercat_to_host(Ethercat::<
+                                u32,
+                            >::from_bytes(
+                                bytes
+                            )))));
+                        };
+                        if retry_count < DEFAULT_RETRIES {
+                            retry_count += 1;
+                        } else {
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+            if nack_count >= 3 {
+                return Err(MainError::MissedTooManyAcks);
+            }
+        }
+    }
+
+    /// Write EEPROM to slave bypassing cache. APWR method.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `auto_indement_address`: Configured address of slave
+    /// `eeprom_address`: Address in EEPROM
+    /// `data`: Data
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The eeprom is too busy
+    /// - Error bits couldn't be cleared
+    /// - Eeprom data couldn't be send
+    /// - Eeprom command couldn't be send
+    ///
+    /// # Returns
+    /// Error or ok
+    pub fn write_eeprom_ap(
+        &mut self,
+        auto_inrecment_address: u16,
+        eeprom_address: u16,
+        data: Ethercat<u16>,
+        timeout: Duration,
+    ) -> Result<(), MainError> {
+        let mut eeprom_state = 0;
+        if !self.eeprom_wait_not_busy_ap(auto_inrecment_address, &mut eeprom_state, timeout)? {
+            return Err(MainError::EepromBusy);
+        }
+
+        // Clear error bits, if they are set
+        if eeprom_state & EEPROM_STATE_MACHINE_ERROR_MASK != 0 {
+            apwr(
+                &mut self.port,
+                auto_inrecment_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
+                TIMEOUT_RET3,
+            )?;
+        }
+
+        let mut no_ack = 0;
+        loop {
+            let mut retry_counter = 0;
+            loop {
+                let Err(err) = apwr(
+                    &mut self.port,
+                    auto_inrecment_address,
+                    EthercatRegister::EepromData.into(),
+                    &mut data.to_bytes(),
+                    TIMEOUT_RETURN,
+                ) else {
+                    break;
+                };
+                if retry_counter < DEFAULT_RETRIES {
+                    retry_counter += 1;
+                } else {
+                    return Err(err.into());
+                }
+            }
+
+            let eeprom = Eeprom {
+                command: EepromCommand::Write,
+                address: eeprom_address,
+                d2: 0,
+            };
+            let mut eeprom_bytes = [0; size_of::<Eeprom>()];
+            eeprom.write_to(&mut eeprom_bytes.as_mut_slice())?;
+            retry_counter = 0;
+            loop {
+                let Err(err) = apwr(
+                    &mut self.port,
+                    auto_inrecment_address,
+                    EthercatRegister::EepromControlStat.into(),
+                    &mut eeprom_bytes,
+                    TIMEOUT_RETURN,
+                ) else {
+                    break;
+                };
+                if retry_counter < DEFAULT_RETRIES {
+                    retry_counter += 1;
+                } else {
+                    return Err(err.into());
+                }
+            }
+            thread::sleep(2 * LOCAL_DELAY);
+            eeprom_state = 0;
+
+            if !self.eeprom_wait_not_busy_ap(auto_inrecment_address, &mut eeprom_state, timeout)? {
+                continue;
+            }
+            if eeprom_state & EEPROM_STATE_MACHINE_ERROR_NACK != 0 {
+                no_ack += 1;
+                thread::sleep(LOCAL_DELAY * 5);
+            } else {
+                return Ok(());
+            }
+            if no_ack >= 3 {
+                return Err(MainError::MissedTooManyAcks);
+            }
+        }
+    }
+
+    fn eeprom_wait_not_busy_fp(
+        &mut self,
+        config_address: u16,
+        eeprom_state: &mut u16,
+        timeout: Duration,
+    ) -> Result<bool, NicdrvError> {
+        let timer = OsalTimer::new(timeout);
+
+        let mut retry_count = 0;
+        loop {
+            if retry_count != 0 {
+                thread::sleep(LOCAL_DELAY);
+            }
+            retry_count += 1;
+
+            let mut word = [0; 2];
+            let Err(err) = fprd(
+                &mut self.port,
+                config_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut word,
+                TIMEOUT_RETURN,
+            ) else {
+                *eeprom_state = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                if *eeprom_state & EEPROM_STATE_MACHINE_BUSY == 0 || timer.is_expired() {
+                    return Ok(*eeprom_state & EEPROM_STATE_MACHINE_BUSY == 0);
+                }
+                continue;
+            };
+            if timer.is_expired() {
+                return Err(err);
+            }
+        }
+    }
+
+    /// Read EEPROM from slave bypassing cache. Fixed Pointer Read method.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `config_address`: Configured address of slave
+    /// `eeprom_address`: Address in the EEPROM
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Failed to check whether the eeprom is busy
+    /// - Eeprom is busy
+    /// - Failed to clear error bits
+    /// - Failed to send EEPROM command
+    /// - Failed to read data
+    ///
+    /// # Returns
+    /// EEPROM data 64-bit or 32-bit
+    pub fn read_eeprom_fp(
+        &mut self,
+        config_address: u16,
+        eeprom_address: u16,
+        timeout: Duration,
+    ) -> Result<Ethercat<u64>, MainError> {
+        let mut eeprom_state = 0;
+        if !self.eeprom_wait_not_busy_fp(config_address, &mut eeprom_state, timeout)? {
+            return Err(MainError::EepromBusy);
+        }
+
+        // Clear error bits if set
+        if eeprom_address & EEPROM_STATE_MACHINE_ERROR_MASK != 0 {
+            fpwr(
+                &mut self.port,
+                config_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
+                TIMEOUT_RET3,
+            )?;
+        }
+
+        let mut no_ack_counter = 0;
+        loop {
+            let eeprom = Eeprom {
+                command: EepromCommand::Read,
+                address: eeprom_address,
+                d2: 0,
+            };
+            let mut eeprom_bytes = [0; size_of::<Eeprom>()];
+            eeprom.write_to(&mut eeprom_bytes.as_mut_slice())?;
+
+            let mut retry_count = 0;
+            loop {
+                let Err(err) = fpwr(
+                    &mut self.port,
+                    config_address,
+                    EthercatRegister::EepromControlStat.into(),
+                    &mut eeprom_bytes,
+                    TIMEOUT_RETURN,
+                ) else {
+                    break;
+                };
+
+                if retry_count >= DEFAULT_RETRIES {
+                    return Err(err.into());
+                }
+                retry_count += 1;
+            }
+
+            thread::sleep(LOCAL_DELAY);
+            eeprom_state = 0;
+            if !self.eeprom_wait_not_busy_fp(config_address, &mut eeprom_state, timeout)? {
+                continue;
+            }
+
+            // If no ACK was received
+            if eeprom_state & EEPROM_STATE_MACHINE_ERROR_NACK == 0 {
+                no_ack_counter += 1;
+                thread::sleep(LOCAL_DELAY * 5);
+                if no_ack_counter >= 3 {
+                    return Err(MainError::MissedTooManyAcks);
+                }
+            } else if eeprom_state & EEPROM_STATE_MACHINE_READ64 != 0 {
+                retry_count = 0;
+                loop {
+                    let mut bytes = [0; 8];
+                    let Err(error) = fprd(
+                        &mut self.port,
+                        config_address,
+                        EthercatRegister::EepromData.into(),
+                        &mut bytes,
+                        TIMEOUT_RETURN,
+                    ) else {
+                        return Ok(Ethercat::<u64>::from_bytes(bytes));
+                    };
+                    if retry_count >= DEFAULT_RETRIES {
+                        return Err(error.into());
+                    }
+                    retry_count += 1;
+                }
+            } else {
+                retry_count = 0;
+                loop {
+                    let mut bytes = [0; 4];
+                    let Err(error) = fprd(
+                        &mut self.port,
+                        config_address,
+                        EthercatRegister::EepromData.into(),
+                        &mut bytes,
+                        TIMEOUT_RETURN,
+                    ) else {
+                        return Ok(host_to_ethercat(u64::from(ethercat_to_host(
+                            Ethercat::<u32>::from_bytes(bytes),
+                        ))));
+                    };
+                    if retry_count >= DEFAULT_RETRIES {
+                        return Err(error.into());
+                    }
+                    retry_count += 1;
+                }
+            }
+        }
+    }
+
+    /// Write EEPROM to slave bypassing cache. Fixed pointer write method.
+    ///
+    /// # Parameter
+    /// `context`: Context struct
+    /// `config_address`: Configured address of slave
+    /// `eeprom_address`: Address in the EEPROM
+    /// `data`: 16-bit data
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Failed to check whether the EEPROM is busy
+    /// - EEPROM is busy
+    /// - Failed to clear error bits
+    /// - Failed to send EEPROM command
+    /// - Failed to send data
+    ///
+    /// # Returns
+    /// `Ok(())` or error
+    pub fn write_eeprom_fp(
+        &mut self,
+        config_address: u16,
+        eeprom_address: u16,
+        data: Ethercat<u16>,
+        timeout: Duration,
+    ) -> Result<(), MainError> {
+        let mut eeprom_state = 0;
+        if !self.eeprom_wait_not_busy_fp(config_address, &mut eeprom_state, timeout)? {
+            return Err(MainError::EepromBusy);
+        }
+
+        // Clear error bits if set
+        if eeprom_state & EEPROM_STATE_MACHINE_ERROR_MASK != 0 {
+            fpwr(
+                &mut self.port,
+                config_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
+                TIMEOUT_RET3,
+            )?;
+        }
+
+        let mut no_ack_count = 0;
+        loop {
+            let mut retry_count = 0;
+            loop {
+                let Err(error) = fpwr(
+                    &mut self.port,
+                    config_address,
+                    EthercatRegister::EepromData.into(),
+                    &mut data.to_bytes(),
+                    TIMEOUT_RETURN,
+                ) else {
+                    break;
+                };
+                if retry_count >= DEFAULT_RETRIES {
+                    return Err(error.into());
+                }
+                retry_count += 1;
+            }
+
+            let eeprom = Eeprom {
+                command: EepromCommand::Write,
+                address: eeprom_address,
+                d2: 0,
+            };
+            let mut eeprom_bytes = [0; size_of::<Eeprom>()];
+            eeprom.write_to(&mut eeprom_bytes.as_mut_slice())?;
+
+            retry_count = 0;
+            loop {
+                let Err(error) = fpwr(
+                    &mut self.port,
+                    config_address,
+                    EthercatRegister::EepromControlStat.into(),
+                    &mut eeprom_bytes,
+                    TIMEOUT_RETURN,
+                ) else {
+                    break;
+                };
+                if retry_count >= DEFAULT_RETRIES {
+                    return Err(error.into());
+                }
+                retry_count += 1;
+            }
+
+            thread::sleep(LOCAL_DELAY * 2);
+            eeprom_state = 0;
+            if !self.eeprom_wait_not_busy_fp(config_address, &mut eeprom_state, timeout)? {
+                continue;
+            }
+            if eeprom_state & EEPROM_STATE_MACHINE_ERROR_NACK != 0 {
+                no_ack_count += 1;
+                thread::sleep(LOCAL_DELAY * 5);
+                if no_ack_count >= 3 {
+                    return Err(MainError::MissedTooManyAcks);
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Transmit processdata to slaves.
+    /// Uses Logical read/write, or logical read followed by logical write if logical read/write is not allowed (blockLRW).
+    /// Both the input and output processdata are transmitted.
+    /// The outputs with the actual data, the inputs have a plcaeholder.
+    /// The inputs are gathered with the receive processdata function.
+    /// In contrast to the base lrw function, this function is non-blocking.
+    /// If the processdata doesn't fit in one datagram, multiple are used.
+    /// In order to recombine thee slave response, a stack is used.
+    ///
+    /// # Parameters
+    /// `self`: Context struct
+    /// `group`: Group number
+    /// `use_overlap_io`: Flag if overlapped iomap is used
+    ///
+    /// # Returns
+    /// Ok if processdata is transmitted without error, error otherwise
+    fn main_send_processdata(&mut self, group: u8, use_overlap_io: bool) -> Result<(), MainError> {
+        let group_usize = usize::from(group);
+        let mut first = self.grouplist[group_usize].has_dc;
+
+        // For overlapping IO map, use the biggest
+        let (mut length, mut io_map_input_offset) = if use_overlap_io {
+            // For overlap IOmap make the frame EQ big to the biggest part
+            (
+                self.grouplist[group_usize]
+                    .output_bytes
+                    .max(self.grouplist[group_usize].input_bytes),
+                // Save the offset used to compensate where to save inputs when frame returns
+                self.grouplist[group_usize].output_bytes,
+            )
+        } else {
+            (
+                self.grouplist[group_usize].output_bytes + self.grouplist[group_usize].input_bytes,
+                0,
+            )
+        };
+
+        if length == 0 {
+            return Err(MainError::NoIOFound);
+        }
+
+        let mut logical_address = self.grouplist[group_usize].logical_start_address;
+        // Check if logical read/write is blocked by one or more slaves.
+        if self.grouplist[group_usize].block_logical_read_write > 0 {
+            // If inputs available, generate logical read
+            if self.grouplist[group_usize].input_bytes > 0 {
+                let mut current_segment = self.grouplist[group_usize].first_input_segment;
+                let mut data = self.grouplist[group_usize].inputs;
+                let mut length = self.grouplist[group_usize].input_bytes;
+                logical_address += self.grouplist[group_usize].output_bytes;
+
+                // Segment transfer if needed
+                loop {
+                    let sublength =
+                        if current_segment == self.grouplist[group_usize].first_input_segment {
+                            self.grouplist[group_usize].io_segments[usize::from(current_segment)]
+                                - u32::from(self.grouplist[group_usize].input_offset)
+                        } else {
+                            self.grouplist[group_usize].io_segments[usize::from(current_segment)]
+                        };
+                    current_segment += 1;
+
+                    // Get new index
+                    let index = self.port.get_index();
+                    let word1 = low_word(logical_address);
+                    let word2 = high_word(logical_address);
+                    setup_datagram(
+                        &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
+                        CommandType::LogicalRead,
+                        index,
+                        word1,
+                        word2,
+                        &data[..sublength as usize],
+                    );
+                    let dc_offset = if first {
+                        first = false;
+                        // Fixed Pointer Read Multiple Write in second datagram
+                        add_datagram(
+                            &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
+                            CommandType::LogicalRead,
+                            index,
+                            false,
+                            self.slavelist[usize::from(self.grouplist[group_usize].dc_next)]
+                                .config_address,
+                            EthercatRegister::DistributedClockSystemTime.into(),
+                            &host_to_ethercat(self.dc_time).to_bytes(),
+                        ) as u16
+                    } else {
+                        0
+                    };
+
+                    // Send frame
+                    self.port.out_frame_red(index)?;
+
+                    // Push index and data pointer on stack
+                    self.index_stack.push_index(index, data, dc_offset);
+                    length -= sublength;
+                    logical_address += sublength;
+                    data = &data[sublength as usize..];
+
+                    if length == 0
+                        || current_segment >= self.grouplist[group_usize].used_segment_count
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // If outputs available generate logical write
+            if self.grouplist[group_usize].output_bytes != 0 {
+                let mut data = self.grouplist[group_usize].outputs;
+                let mut length = self.grouplist[group_usize].output_bytes;
+                let mut logical_address = self.grouplist[group_usize].logical_start_address;
+                let mut current_segment = 0;
+
+                // Segment transfer if needed
+                loop {
+                    let sub_length =
+                        self.grouplist[group_usize].io_segments[current_segment].min(length);
+                    current_segment += 1;
+
+                    // Get new index
+                    let index = self.port.get_index();
+                    let word1 = low_word(logical_address);
+                    let word2 = high_word(logical_address);
+
+                    setup_datagram(
+                        &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
+                        CommandType::FixedReadMultipleWrite,
+                        index,
+                        word1,
+                        word2,
+                        &data[..sub_length as usize],
+                    );
+                    let dc_offset = if first {
+                        first = false;
+
+                        // Fixed Pointer Read Multiple Write in second datagram
+                        add_datagram(
+                            &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
+                            CommandType::FixedReadMultipleWrite,
+                            index,
+                            false,
+                            self.slavelist[usize::from(self.grouplist[usize::from(group)].dc_next)]
+                                .config_address,
+                            EthercatRegister::DistributedClockSystemTime.into(),
+                            &host_to_ethercat(self.dc_time).to_bytes(),
+                        ) as u16
+                    } else {
+                        0
+                    };
+
+                    // Send frame
+                    self.port.out_frame_red(index)?;
+
+                    // Push index and data pointer on stack
+                    self.index_stack.push_index(index, data, dc_offset);
+
+                    length -= sub_length;
+                    logical_address += sub_length;
+                    data = &data[sub_length as usize..];
+
+                    if length == 0
+                        || current_segment
+                            >= usize::from(self.grouplist[group_usize].used_segment_count)
+                    {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Logical read/write can be used
+            let mut data = if self.grouplist[group_usize].output_bytes == 0 {
+                // Clear offset, don't compensate for overlapping IOmap if there only are inputs
+                io_map_input_offset = 0;
+
+                self.grouplist[group_usize].inputs
+            } else {
+                self.grouplist[group_usize].outputs
+            };
+
+            // Segment transfer if needed
+            let mut current_segment = 0;
+            loop {
+                let sub_length = self.grouplist[group_usize].io_segments[current_segment];
+                current_segment += 1;
+
+                // Get new index
+                let index = self.port.get_index();
+                let word1 = low_word(logical_address);
+                let word2 = high_word(logical_address);
+
+                setup_datagram(
+                    &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
+                    CommandType::LogicalReadWrite,
+                    index,
+                    word1,
+                    word2,
+                    &data[..sub_length as usize],
+                );
+
+                let dc_offset = if first {
+                    first = false;
+
+                    //Fixed Pointer Read Multiple Write in second datagram
+                    add_datagram(
+                        &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
+                        CommandType::FixedReadMultipleWrite,
+                        index,
+                        false,
+                        self.slavelist[usize::from(self.grouplist[group_usize].dc_next)]
+                            .config_address,
+                        EthercatRegister::DistributedClockSystemTime.into(),
+                        &host_to_ethercat(self.dc_time).to_bytes(),
+                    ) as u16
+                } else {
+                    0
+                };
+
+                // Send frame
+                self.port.out_frame_red(index)?;
+
+                // Push index and pointer on stack.
+                // The `iomap_input_offset` compensate for where the inputs are stored
+                // in the IOmap if we use an overlapping IOmap. If a regular IOmap is
+                // used, it should always be 0.
+                self.index_stack.push_index(
+                    index,
+                    &data[io_map_input_offset as usize..],
+                    dc_offset,
+                );
+                length -= sub_length;
+                logical_address += sub_length;
+                data = &data[sub_length as usize..];
+
+                if length == 0
+                    || current_segment
+                        >= usize::from(self.grouplist[group_usize].used_segment_count)
+                {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn send_overlap_processdata_group(context: &mut Context, group: u8) -> i32 {
+        todo!()
+    }
+
+    pub fn send_processdata_group(context: &mut Context, group: u8) -> i32 {
+        todo!()
+    }
+
+    pub fn receive_processdata_group(context: &mut Context, group: u8, timeout: Duration) -> i32 {
+        todo!()
+    }
+
+    pub fn send_processdata(context: &mut Context) -> i32 {
+        todo!()
+    }
+
+    pub fn send_overlap_processdata(context: &mut Context) -> i32 {
+        todo!()
+    }
+
+    pub fn receive_processdata(context: &mut Context, timeout: Duration) -> i32 {
+        todo!()
+    }
+}
+
+/// An eeprom request struct, containing information required to perform EEPROM requests in
+/// parallel.
+pub struct EepromRequest {
+    slave: u16,
+}
+
+impl EepromRequest {
+    /// parallel read EEPROM from slave bypassing cache.
+    /// This function sends the request to the slave.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `slave`: Slave number
+    /// `eeprom_address`: Address in EEPROM
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Eeprom control can't be taken by the master
+    /// - Failed to check whether the eeprom is busy
+    /// - Eeprom is busy
+    /// - Failed to clear error bits
+    /// - Failed to send Eeprom command
+    ///
+    /// # Returns
+    /// `EepromRequest` which can later be used to retrieve the result.
+    pub fn request_eeprom_data(
+        context: &mut Context,
+        slave: u16,
+        eeprom_address: SiiGeneralItem,
+    ) -> Result<Self, MainError> {
+        // Set eeprom control to master
+        context.eeprom_to_master(slave)?;
+        let config_address = context.slavelist[usize::from(slave)].config_address;
+
+        let mut eeprom_state = 0;
+        if !context.eeprom_wait_not_busy_fp(config_address, &mut eeprom_state, TIMEOUT_EEP)? {
+            return Err(MainError::EepromBusy);
+        }
+
+        // Clear error bits, if set
+        if eeprom_state & EEPROM_STATE_MACHINE_ERROR_MASK != 0 {
+            fpwr(
+                &mut context.port,
+                config_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut host_to_ethercat(u16::from(EepromCommand::Nop)).to_bytes(),
+                TIMEOUT_RET3,
+            )?;
+        }
+
+        let eeprom = Eeprom {
+            command: EepromCommand::Read,
+            address: eeprom_address.into(),
+            d2: 0,
+        };
+        let mut eeprom_bytes = [0; size_of::<Eeprom>()];
+        eeprom.write_to(&mut eeprom_bytes.as_mut_slice())?;
+
+        let mut retry_counter = 0;
+        loop {
+            let Err(error) = fpwr(
+                &mut context.port,
+                config_address,
+                EthercatRegister::EepromControlStat.into(),
+                &mut eeprom_bytes,
+                TIMEOUT_RETURN,
+            ) else {
+                return Ok(Self { slave });
+            };
+
+            if retry_counter >= DEFAULT_RETRIES {
+                return Err(error.into());
+            }
+            retry_counter += 1;
+        }
+    }
+
+    /// Parallel read EEPROM from slave bypassing cache.
+    /// Executes the actual read from the slave.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `slave`: Slave number
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Failed to check if the eeprom is busy
+    /// - Eeprom is busy
+    /// - Failed to read data
+    ///
+    /// # Returns
+    /// 32-bit EEPROM data
+    pub fn read_eeprom_data(
+        self,
+        context: &mut Context,
+        timeout: Duration,
+    ) -> Result<Ethercat<u32>, MainError> {
+        let config_address = context.slavelist[usize::from(self.slave)].config_address;
+        let mut eeprom_state = 0;
+        if !context.eeprom_wait_not_busy_fp(config_address, &mut eeprom_state, timeout)? {
+            return Err(MainError::EepromBusy);
+        }
+
+        let mut retries = 0;
+        loop {
+            let mut data = [0; 4];
+            let Err(error) = fprd(
+                &mut context.port,
+                config_address,
+                EthercatRegister::EepromData.into(),
+                &mut data,
+                TIMEOUT_RETURN,
+            ) else {
+                return Ok(Ethercat::<u32>::from_bytes(data));
+            };
+            if retries >= DEFAULT_RETRIES {
+                return Err(error.into());
+            }
+            retries += 1;
+        }
+    }
+}
+
+/// Emergency request structure
+struct EmergencyRequest {
+    mailbox_header: MailboxHeader,
+    can_open: Ethercat<u16>,
+    error_code: Ethercat<u16>,
+    error_register: u8,
+    byte_data: u8,
+    word1: Ethercat<u16>,
+    word2: Ethercat<u16>,
+}
+
+impl EmergencyRequest {
+    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let mailbox_header = MailboxHeader::read_from(reader)?;
+        let mut word = [0; 2];
+        reader.read_exact(&mut word)?;
+        let can_open = Ethercat::<u16>::from_bytes(word);
+        reader.read_exact(&mut word)?;
+        let error_code = Ethercat::<u16>::from_bytes(word);
+        let mut byte = [0];
+        reader.read_exact(&mut byte)?;
+        let error_register = byte[0];
+        reader.read_exact(&mut byte)?;
+        let byte_data = byte[0];
+        reader.read_exact(&mut word)?;
+        let word1 = Ethercat::<u16>::from_bytes(word);
+        reader.read_exact(&mut word)?;
+        let word2 = Ethercat::<u16>::from_bytes(word);
+        Ok(Self {
+            mailbox_header,
+            can_open,
+            error_code,
+            error_register,
+            byte_data,
+            word1,
+            word2,
+        })
+    }
 }
 
 fn fixed_pointer_read_multi(
@@ -1701,7 +3364,7 @@ fn fixed_pointer_read_multi(
     sl_status_list: &mut [ApplicationLayerStatus],
     timeout: Duration,
 ) -> Result<(), MainError> {
-    let mut port = context.port.lock().unwrap();
+    let port = &mut context.port;
     let index = port.get_index();
     let mut sl_count: u16 = 0;
     setup_datagram(
@@ -1710,7 +3373,7 @@ fn fixed_pointer_read_multi(
         index,
         config_list[usize::from(sl_count)],
         EthercatRegister::ApplicationLayerStatus.into(),
-        (&mut sl_status_list[usize::from(sl_count)]).into(),
+        (&sl_status_list[usize::from(sl_count)]).into(),
     );
     let mut sl_data_position = [0; MAX_FIXED_POINTER_READ_MULTI];
     sl_data_position[usize::from(sl_count)] = ETHERCAT_HEADER_SIZE;
@@ -1723,7 +3386,7 @@ fn fixed_pointer_read_multi(
             true,
             config_list[usize::from(sl_count)],
             EthercatRegister::ApplicationLayerStatus.into(),
-            (&mut sl_status_list[usize::from(sl_count)]).into(),
+            (&sl_status_list[usize::from(sl_count)]).into(),
         );
     }
     sl_count = sl_count.max(number - 1);
@@ -1735,7 +3398,7 @@ fn fixed_pointer_read_multi(
             false,
             config_list[usize::from(sl_count)],
             EthercatRegister::ApplicationLayerStatus.into(),
-            (&mut sl_status_list[usize::from(sl_count)]).into(),
+            (&sl_status_list[usize::from(sl_count)]).into(),
         );
     }
     port.src_confirm(index, timeout)?;
@@ -1750,102 +3413,14 @@ fn fixed_pointer_read_multi(
     Ok(())
 }
 
-pub fn statecheck(
-    context: &mut Context,
-    slave: u16,
-    request_state: EthercatState,
-    timeout: Duration,
-) -> u16 {
-    todo!()
-}
-
-pub fn esi_dump(context: &mut Context, slave: u16, esibuf: &mut Vec<u8>) {
-    todo!()
-}
-
-pub fn eeprom_to_master(context: &mut Context, slave: u16) -> i32 {
-    todo!()
-}
-
-pub fn eeprom_to_pdi(context: &mut Context, slave: u16) -> i32 {
-    todo!()
-}
-
-pub fn read_eeprom_ap(context: &mut Context, aiadr: u16, eeproma: u16, timeout: Duration) -> u64 {
-    todo!()
-}
-
-pub fn next_mailbox_count(count: u8) -> u8 {
-    todo!()
-}
-
-pub fn write_eeprom_ap(
-    context: &mut Context,
-    aiadr: u16,
-    eeproma: u16,
-    data: u16,
-    timeout: Duration,
-) -> i32 {
-    todo!()
-}
-pub fn read_eeprom_fp(
-    context: &mut Context,
-    config_address: u16,
-    eeproma: u16,
-    timeout: Duration,
-) -> u64 {
-    todo!()
-}
-
-pub fn write_eeprom_fp(
-    context: &mut Context,
-    config_address: u16,
-    eeproma: u16,
-    data: u16,
-    timeout: Duration,
-) -> i32 {
-    todo!()
-}
-
-pub fn read_eeprom1(context: &mut Context, slave: u16, eeprom_address: SiiGeneralItem) {
-    todo!()
-}
-
-pub fn read_eeprom2(context: &mut Context, slave: u16, timeout: Duration) -> Ethercat<u32> {
-    todo!()
-}
-
-pub fn send_overlap_processdata_group(context: &mut Context, group: u8) -> i32 {
-    todo!()
-}
-
-pub fn receive_processdata_group(context: &mut Context, group: u8, timeout: Duration) -> i32 {
-    todo!()
-}
-
-pub fn send_processdata(context: &mut Context) -> i32 {
-    todo!()
-}
-
-pub fn send_overlap_processdata(context: &mut Context) -> i32 {
-    todo!()
-}
-
-pub fn receive_processdata(context: &mut Context, timeout: Duration) -> i32 {
-    todo!()
-}
-
-pub fn send_processdata_group(context: &mut Context, group: u8) -> i32 {
-    todo!()
-}
-
-/// Emergency request structure
-struct EmergencyRequest {
-    mailbox_header: MailboxHeader,
-    can_open: u16,
-    error_code: u16,
-    error_register: u8,
-    bdata: u8,
-    w1: u16,
-    w2: u16,
+/// Get index of next mailbox counter value.
+/// Used for Mailbox Lik Layer.
+///
+/// # Parameters
+/// `count`: Mailbox counter value 1..=7
+///
+/// # Returns next mailbox counter value
+pub const fn next_mailbox_count(count: u8) -> u8 {
+    // Wraps around to 1, not 0 for a range of 1..=7
+    count % 7 + 1
 }

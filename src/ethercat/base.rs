@@ -51,13 +51,17 @@ fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u
 /// - `address_offset`: Address offset
 /// - `length`: Length of datagram excluding EtherCAT header
 /// - `data`: Databuffer to be compied in datagram
+///
+/// # Panics
+/// Will panic if:
+/// - Data is too large to fit in buffer
 pub fn setup_datagram(
     frame: &mut Buffer,
     command: CommandType,
     index: u8,
     address_position: u16,
     address_offset: u16,
-    data: &mut [u8],
+    data: &[u8],
 ) {
     // Ethernet header is preset and fixed in frame buffers.
     // EtherCAT header needs to be added after that.
@@ -95,6 +99,9 @@ pub fn setup_datagram(
 /// - `address_offset`: Address offset
 /// - `data`: Databuffer to be copied in datagram
 ///
+/// # Panics
+/// Will panic if the datagram doesn't fit in the frame.
+///
 /// # Returns
 /// Offset to data in rx frame, usefull to retrieve data after RX
 pub fn add_datagram(
@@ -104,7 +111,7 @@ pub fn add_datagram(
     more: bool,
     address_position: u16,
     address_offset: u16,
-    data: &mut [u8],
+    data: &[u8],
 ) -> usize {
     // Copy previous frame size
     let previous_length = frame.len();
@@ -153,10 +160,7 @@ pub fn add_datagram(
     );
 
     // Set Work Counter to 0
-    frame
-        .iter_mut()
-        .skip(previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE + data.len())
-        .for_each(|byte| *byte = 0);
+    frame[previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE + data.len()..].fill(0);
 
     // Return offset to data in rx frame, 14 bytes smaller than tx frame due to stripping of
     // thernet header.
@@ -214,10 +218,9 @@ fn execute_primitive_command(
         | CommandType::LogicalRead
         | CommandType::LogicalReadWrite
         | CommandType::AutoReadMultipleWrite
-        | CommandType::FixedReadMultipleWrite => data
-            .iter_mut()
-            .zip(port.rx_buf.lock().unwrap()[usize::from(index)][ETHERCAT_HEADER_SIZE..].iter())
-            .for_each(|(dest, src)| *dest = *src),
+        | CommandType::FixedReadMultipleWrite => data.copy_from_slice(
+            &port.rx_buf.lock().unwrap()[usize::from(index)][ETHERCAT_HEADER_SIZE..],
+        ),
     }
 
     // Clear buffer status
@@ -234,6 +237,9 @@ fn execute_primitive_command(
 /// - `address_offset`: Address offset, slave memory address
 /// - `data`: databuffer to be written to slaves
 /// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
 ///
 /// # Returns
 /// WorkCounter or error
@@ -262,6 +268,9 @@ pub fn bwr(
 /// - `address_offset`: Address offset, slave memory address
 /// - `data`: databuffer to put slave data in
 /// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
+///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
 ///
 /// # Returns
 /// workcounter or error
@@ -292,6 +301,9 @@ pub fn brd(
 /// `data`: Databuffer to put slave data in
 /// `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Workcounter or error
 pub fn aprd(
@@ -320,6 +332,9 @@ pub fn aprd(
 /// - `address_offset`: Address offset, slave memory address
 /// - `adta`: Databuffer to put slave data in
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
 ///
 /// # Returns
 /// Workcounter or error
@@ -350,6 +365,9 @@ pub fn armw(
 /// - `data`: Databuffer to put slave data in
 /// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
+///
 /// # Returns
 /// Workcounter or error
 pub fn frmw(
@@ -377,6 +395,9 @@ pub fn frmw(
 /// - `address_offset`: Address offset, slave memory address
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Word data from slave or error
 pub fn aprdw(
@@ -393,7 +414,7 @@ pub fn aprdw(
         &mut word,
         timeout,
     )?;
-    Ok(Ethercat::from_raw(u16::from_ne_bytes(word)))
+    Ok(Ethercat::<u16>::from_bytes(word))
 }
 
 /// Configured address read primitive (blocking)
@@ -405,19 +426,22 @@ pub fn aprdw(
 /// - `data`: Databuffer to put slave data in
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Workcounter or error
 pub fn fprd(
     port: &mut Port,
     address_position: u16,
-    address_offset: EthercatRegister,
+    address_offset: u16,
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     execute_primitive_command(
         port,
         address_position,
-        address_offset as u16,
+        address_offset,
         data,
         timeout,
         CommandType::FixedPointerRead,
@@ -432,6 +456,9 @@ pub fn fprd(
 /// - `address_offset`: Address offset, slave memory address
 /// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Word data from slave
 pub fn fprdw(
@@ -441,8 +468,14 @@ pub fn fprdw(
     timeout: Duration,
 ) -> Result<Ethercat<u16>, NicdrvError> {
     let mut word = [0; 2];
-    fprd(port, address_position, address_offset, &mut word, timeout)?;
-    Ok(Ethercat::from_raw(u16::from_ne_bytes(word)))
+    fprd(
+        port,
+        address_position,
+        u16::from(address_offset),
+        &mut word,
+        timeout,
+    )?;
+    Ok(Ethercat::<u16>::from_bytes(word))
 }
 
 /// Configured address read, long return primitive (blocking)
@@ -453,6 +486,9 @@ pub fn fprdw(
 /// - `address_offset`: Address offset, slave memory address
 /// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Long data from slave
 pub fn fprdl(
@@ -462,8 +498,14 @@ pub fn fprdl(
     timeout: Duration,
 ) -> Result<Ethercat<u32>, NicdrvError> {
     let mut word = [0; 4];
-    fprd(port, address_position, address_offset, &mut word, timeout)?;
-    Ok(Ethercat::from_raw(u32::from_ne_bytes(word)))
+    fprd(
+        port,
+        address_position,
+        address_offset.into(),
+        &mut word,
+        timeout,
+    )?;
+    Ok(Ethercat::<u32>::from_bytes(word))
 }
 
 /// Configured address read, long long return primitive (blocking)
@@ -474,6 +516,9 @@ pub fn fprdl(
 /// - `address_offset`: Address offset, slave memory address
 /// - `timeout`: timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Long long data from slave
 pub fn fprdll(
@@ -483,8 +528,14 @@ pub fn fprdll(
     timeout: Duration,
 ) -> Result<Ethercat<u64>, NicdrvError> {
     let mut word = [0; 8];
-    fprd(port, address_position, address_offset, &mut word, timeout)?;
-    Ok(Ethercat::from_raw(u64::from_ne_bytes(word)))
+    fprd(
+        port,
+        address_position,
+        address_offset.into(),
+        &mut word,
+        timeout,
+    )?;
+    Ok(Ethercat::<u64>::from_bytes(word))
 }
 
 /// Auto increment address write, primitive (blocking)
@@ -495,6 +546,9 @@ pub fn fprdll(
 /// - `address_offset`: Address offset, slave memory address
 /// - `data`: Databuffer to write to slave
 /// - `timeout`: TImeout duration, standard is TIMEOUT_RETURN
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
 ///
 /// # Returns
 /// Workcounter or error
@@ -524,6 +578,9 @@ pub fn apwr(
 /// - `data`: Word data to write to slave
 /// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
+///
 /// # Returns
 /// Workcounter or error
 pub fn apwrw(
@@ -549,6 +606,9 @@ pub fn apwrw(
 /// - `address_position`: Address position, slave with that address writes
 /// - `address_offset`: Address offset, slave memory address
 /// - `data`: Databuffer to write to slave
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
 ///
 /// # Returns
 /// Workcounter or error
@@ -578,6 +638,9 @@ pub fn fpwr(
 /// - `data`: Word to write to slave
 /// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
+///
 /// # Returns
 /// Workcounter or error
 pub fn fpwrw(
@@ -603,6 +666,9 @@ pub fn fpwrw(
 /// - `logical_address`: Logical memory address
 /// - `data`: Databuffer to write to and read from slave
 /// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
 ///
 /// # Returns
 /// Workcounter or error
@@ -630,6 +696,9 @@ pub fn lrw(
 /// - `data`: Databuffer to read from slave
 /// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
 ///
+/// # Errors
+/// Will return an error when it fails to send the request or didn't receive a reply.
+///
 /// # Returns
 /// Workcounter or error
 pub fn lrd(
@@ -655,6 +724,9 @@ pub fn lrd(
 /// - `logical_address`: Logical memory address
 /// - `data`: Databuffer to write to slave
 /// - `timeout`: Timeout duration, standard is TIMEOUT_RETURN
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
 ///
 /// # Returns
 /// Workcounter or error
@@ -684,6 +756,12 @@ pub fn lwr(
 /// - `distributed_clock_reference_slave`: Distributed clock reference slave address
 /// - `distributed_clock_time`: Distributed clock time read from reference slave
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
+///
+/// # Errors
+/// Will return an error when it fails to send the data or didn't receive a reply.
+///
+/// # Panics
+/// If the tx_buffers mutex can't be locked (is poisoned)
 ///
 /// # Returns
 /// Workcounter or error
@@ -718,7 +796,7 @@ pub fn lrwdc(
             false,
             distributed_clock_reference_slave,
             EthercatRegister::DistributedClockSystemTime.into(),
-            &mut distributed_clock_to_ethercat.to_bytes(),
+            &distributed_clock_to_ethercat.to_bytes(),
         )
     };
 

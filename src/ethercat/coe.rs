@@ -113,7 +113,7 @@ impl From<Utf8Error> for CoEError {
 
 /// Variants for easy data access
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug)]
 enum ServiceData {
     Byte([u8; 0x200]),
@@ -176,30 +176,20 @@ impl ServiceData {
         }
     }
 
-    pub fn set_word(&mut self, index: usize, value: Ethercat<u16>) -> bool {
-        if let Some(word) = self.as_words_mut().get_mut(index) {
-            *word = value.into_inner();
-            true
-        } else {
-            false
-        }
+    pub fn set_word_compile_time_checked<const INDEX: usize>(&mut self, value: Ethercat<u16>) {
+        self.as_words_mut()[INDEX] = value.into_inner();
     }
 
-    pub fn set_long(&mut self, index: usize, value: Ethercat<u32>) -> bool {
-        if let Some(long) = self.as_longs_mut().get_mut(index) {
-            *long = value.into_inner();
-            true
-        } else {
-            false
-        }
+    pub fn set_long_compile_time_checked<const INDEX: usize>(&mut self, value: Ethercat<u32>) {
+        self.as_longs_mut()[INDEX] = value.into_inner();
     }
 
-    pub fn get_word(&self, index: usize) -> Option<Ethercat<u16>> {
-        self.as_words().get(index).copied().map(Ethercat::from_raw)
+    pub fn get_word_compile_time_checked<const INDEX: usize>(&self) -> Ethercat<u16> {
+        Ethercat::from_raw(self.as_words()[INDEX])
     }
 
-    pub fn get_long(&self, index: usize) -> Option<Ethercat<u32>> {
-        self.as_longs().get(index).copied().map(Ethercat::from_raw)
+    pub fn get_long_compile_time_checked<const INDEX: usize>(&self) -> Ethercat<u32> {
+        Ethercat::from_raw(self.as_longs()[INDEX])
     }
 }
 
@@ -229,9 +219,9 @@ impl ServiceDataObject {
         let mailbox_header = MailboxHeader::read_from(bytes).unwrap();
         let mut value = [0; 6 + 512];
         bytes.read_exact(&mut value)?;
-        let can_open = Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap()));
+        let can_open = Ethercat::<u16>::from_bytes(value[..2].try_into().unwrap());
         let command = value[2];
-        let index = Ethercat::from_raw(u16::from_ne_bytes(value[3..5].try_into().unwrap()));
+        let index = Ethercat::<u16>::from_bytes(value[3..5].try_into().unwrap());
         let sub_index = value[5];
         let data = ServiceData::Byte(value[6..6 + 512].try_into().unwrap());
         Ok(Self {
@@ -244,12 +234,16 @@ impl ServiceDataObject {
         })
     }
 
-    pub fn read_from_index<R: Read>(&mut self, bytes: &mut R) -> io::Result<()> {
-        let mut value = [0; 512 + 3];
-        bytes.read_exact(&mut value).unwrap();
-        self.index = Ethercat::from_raw(u16::from_ne_bytes(value[0..2].try_into().unwrap()));
-        self.sub_index = value[2];
-        self.data = ServiceData::Byte(value[3..3 + 512].try_into().unwrap());
+    pub fn read_from_index<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        let mut word = [0; 2];
+        reader.read_exact(&mut word)?;
+        self.index = Ethercat::<u16>::from_bytes(word);
+        let mut byte = [0];
+        reader.read_exact(&mut byte)?;
+        self.sub_index = byte[0];
+        let mut data = [0; 512];
+        reader.read_exact(&mut data)?;
+        self.data = ServiceData::Byte(data);
         Ok(())
     }
 
@@ -261,20 +255,20 @@ impl ServiceDataObject {
 }
 
 impl ServiceDataObject {
-    pub const fn mailbox_header_offset(&self) -> usize {
+    pub const fn mailbox_header_offset() -> usize {
         0
     }
 
-    pub const fn can_open_offset(&self) -> usize {
-        self.mailbox_header_offset() + size_of::<MailboxHeader>()
+    pub const fn can_open_offset() -> usize {
+        Self::mailbox_header_offset() + size_of::<MailboxHeader>()
     }
 
-    pub const fn command_offset(&self) -> usize {
-        self.can_open_offset() + size_of::<u16>()
+    pub const fn command_offset() -> usize {
+        Self::can_open_offset() + size_of::<u16>()
     }
 
-    pub const fn index_offset(&self) -> usize {
-        self.command_offset() + size_of::<u8>()
+    pub const fn index_offset() -> usize {
+        Self::command_offset() + size_of::<u8>()
     }
 }
 
@@ -314,10 +308,10 @@ impl ServiceDataObjectService {
         let mailbox_header = MailboxHeader::read_from(bytes)?;
         let mut value = [0; 6 + 512];
         bytes.read_exact(&mut value)?;
-        let can_open = Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap()));
+        let can_open = Ethercat::<u16>::from_bytes(value[..2].try_into().unwrap());
         let opcode = COEObjectDescriptionCommand::try_from(value[2])?;
         let reserved = value[3];
-        let fragments = Ethercat::from_raw(u16::from_ne_bytes(value[4..6].try_into().unwrap()));
+        let fragments = Ethercat::<u16>::from_bytes(value[4..6].try_into().unwrap());
         let data = ServiceData::Byte(value[6..6 + 512].try_into().unwrap());
         Ok(Self {
             mailbox_header,
@@ -462,8 +456,9 @@ fn handle_invalid_slave_response(
     sub_index: u8,
 ) -> CoEError {
     if a_sdo.command == CanopenOverEthercatSdoCommand::Abort.into() {
-        let abort_error =
-            AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
+        let abort_error = AbortError::Abort(ethercat_to_host(
+            a_sdo.data.get_long_compile_time_checked::<0>(),
+        ) as i32);
         // SDO abort frame received
         sdo_error(context, slave, index, sub_index, abort_error);
         abort_error.into()
@@ -494,6 +489,11 @@ fn handle_invalid_slave_response(
 /// - `ca`: False for single subindex, true for complete access, all subindexes read
 /// - `parameter_buffer`: Reference to parameter buffer
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received.
+/// - A response couldn't be parsed into an object.
 ///
 /// # Returns
 /// Bytes read into `parameter_buffer` or error
@@ -544,7 +544,7 @@ pub fn sdo_read(
     sdo.data.as_longs_mut()[0] = 0;
 
     // Send CANopen over EtherCAT request to slave
-    sdo.write_to(&mut mailbox_out).unwrap();
+    sdo.write_to(&mut mailbox_out)?;
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Clean mailbox buffer
@@ -580,7 +580,8 @@ pub fn sdo_read(
             }
         } else {
             // Normal frame response
-            let sdo_len = ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as usize;
+            let sdo_len =
+                ethercat_to_host(a_sdo.data.get_long_compile_time_checked::<0>()) as usize;
 
             // Check whether the parameter fits in the parameter buffer
             if sdo_len <= parameter_buffer.len() {
@@ -626,10 +627,11 @@ pub fn sdo_read(
 
                         sdo.index = host_to_ethercat(index);
                         sdo.sub_index = sub_index;
-                        sdo.data.as_longs_mut()[0] = 0;
+                        sdo.data
+                            .set_long_compile_time_checked::<0>(Ethercat::default());
 
                         // Send segmented upload request to slave
-                        sdo.write_to(&mut mailbox_out).unwrap();
+                        sdo.write_to(&mut mailbox_out)?;
                         mailbox_out.send(context, slave, timeout)?;
 
                         mailbox_in.clear();
@@ -660,7 +662,7 @@ pub fn sdo_read(
                                 }
 
                                 // Copy to parameter buffer
-                                let index_offset = a_sdo.index_offset();
+                                let index_offset = ServiceDataObject::index_offset();
                                 parameter_buffer[hp..].copy_from_slice(
                                     &a_sdo.to_bytes()
                                         [index_offset..index_offset + usize::from(frame_data_size)],
@@ -669,7 +671,7 @@ pub fn sdo_read(
                                 // Segments follow
 
                                 // Copy to parameter buffer
-                                let index_offset = a_sdo.index_offset();
+                                let index_offset = ServiceDataObject::index_offset();
                                 parameter_buffer[hp..].copy_from_slice(
                                     &a_sdo.to_bytes()
                                         [index_offset..index_offset + usize::from(frame_data_size)],
@@ -737,7 +739,7 @@ fn sdo_read_word(
         &mut read_word,
         timeout,
     )?;
-    Ok(Ethercat::from_raw(u16::from_ne_bytes(read_word)))
+    Ok(Ethercat::<u16>::from_bytes(read_word))
 }
 
 /// CANopen over EtherCAT Service Dta Object write, blocking. Single subindex or complete access.
@@ -754,6 +756,11 @@ fn sdo_read_word(
 /// - `sub_index`: Subindex to write, must be 0 or 1 if complete access is used.
 /// - `comlete_access`: False for single subindex, true for complete access, all subindexes written
 /// - `parameter_buffer`: Timeout delay, standard is `TIMEOUT_RX_MAILBOX`
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Received data couldn't be parsed into an object
 ///
 /// # Returns
 /// Unit or error
@@ -803,7 +810,7 @@ pub fn sdo_write(
         sdo.data.as_bytes_mut().copy_from_slice(parameter_buffer);
 
         // Send mailbox SDO download request to slave
-        sdo.write_to(&mut mailbox_out).unwrap();
+        sdo.write_to(&mut mailbox_out)?;
         mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
         mailbox_in.clear();
@@ -858,7 +865,7 @@ pub fn sdo_write(
             sub_index
         };
         sdo.data
-            .set_long(0, host_to_ethercat(parameter_buffer.len() as u32));
+            .set_long_compile_time_checked::<0>(host_to_ethercat(parameter_buffer.len() as u32));
 
         // Copy data to mailbox
         sdo.data.as_bytes_mut()[size_of::<u32>()..]
@@ -866,7 +873,7 @@ pub fn sdo_write(
         parameter_buffer = &mut parameter_buffer[usize::from(frame_data_size)..];
 
         // Send mailbox SDO download request to slave
-        sdo.write_to(&mut mailbox_out).unwrap();
+        sdo.write_to(&mut mailbox_out)?;
         mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
         mailbox_in.clear();
@@ -922,12 +929,11 @@ pub fn sdo_write(
                 sdo.command += toggle;
 
                 // Copy parameter data to mailbox
-                sdo.read_from_index(&mut &parameter_buffer[..usize::from(frame_data_size)])
-                    .unwrap();
+                sdo.read_from_index(&mut &parameter_buffer[..usize::from(frame_data_size)])?;
                 parameter_buffer = &mut parameter_buffer[usize::from(frame_data_size)..];
 
                 // Send Service Data Object download request
-                sdo.write_to(&mut mailbox_out).unwrap();
+                sdo.write_to(&mut mailbox_out)?;
                 mailbox_out.send(context, slave, timeout)?;
 
                 mailbox_in.clear();
@@ -966,6 +972,10 @@ pub fn sdo_write(
 /// - `RxPDOnumber`: Related RxPDO buffer
 /// - `pdo_buffer`: Reference to PDO buffer
 ///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+///
 /// # Returns
 /// Unit or an error
 pub fn rx_pdo(
@@ -986,7 +996,7 @@ pub fn rx_pdo(
     let max_data = context.slavelist[usize::from(slave)].mailbox_length - 8;
     let framedatasize = (pdo_buffer.len() as u16).min(max_data);
     sdo.mailbox_header.length = host_to_ethercat(2 + framedatasize);
-    sdo.mailbox_header.address = host_to_ethercat(0);
+    sdo.mailbox_header.address = Ethercat::default();
     sdo.mailbox_header.priority = 0;
 
     // Get new mailbox counter, used for session handle
@@ -1001,12 +1011,12 @@ pub fn rx_pdo(
         host_to_ethercat((rx_pdo_number & 0x1FF) + (u16::from(COEMailboxType::RxPdo) << 12));
 
     // Copy PDO data to mailbox
-    let command_offset = sdo.command_offset();
+    let command_offset = ServiceDataObject::command_offset();
     mailbox_out.as_mut()[command_offset..]
         .copy_from_slice(&pdo_buffer[..usize::from(framedatasize)]);
 
     // Send mailbox Receive PDO request
-    sdo.write_to(&mut mailbox_out).unwrap();
+    sdo.write_to(&mut mailbox_out)?;
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
     Ok(())
 }
@@ -1021,6 +1031,11 @@ pub fn rx_pdo(
 /// - `tx_pdo_number`: Related TxPDO number
 /// - `pdo_buffer`: Reference to PDO buffer
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Received data couldn't be parsed into an object
 ///
 /// # Returns
 /// Bytes written to pdo or error
@@ -1052,7 +1067,7 @@ pub fn tx_pdo(
     sdo.can_open =
         host_to_ethercat((tx_pdo_number & 0x1FF) + ((COEMailboxType::TxPdoRR as u16) << 12));
 
-    sdo.write_to(&mut mailbox_out).unwrap();
+    sdo.write_to(&mut mailbox_out)?;
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Clear mailboxbuffer
@@ -1072,7 +1087,7 @@ pub fn tx_pdo(
             // If the parameterbuffer is large enough
 
             // Copy parameter in parameter buffer
-            let command_offset = a_sdo.command_offset();
+            let command_offset = ServiceDataObject::command_offset();
             pdo_buffer.copy_from_slice(
                 &mailbox_in.as_ref()[command_offset..command_offset + usize::from(framedatasize)],
             );
@@ -1087,20 +1102,22 @@ pub fn tx_pdo(
 
         // SDO abort frame received
         if a_sdo.command == u8::from(CanopenOverEthercatSdoCommand::Abort) {
-            let abort_error =
-                AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
+            let abort_error = AbortError::Abort(ethercat_to_host(
+                a_sdo.data.get_long_compile_time_checked::<0>(),
+            ) as i32);
             sdo_error(
                 context,
                 slave,
                 0,
                 0,
-                AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32),
+                AbortError::Abort(
+                    ethercat_to_host(a_sdo.data.get_long_compile_time_checked::<0>()) as i32,
+                ),
             );
             return Err(abort_error.into());
-        } else {
-            context.packet_error(slave, 0, 0, PacketError::DataContainerTooSmallForType);
-            return Err(PacketError::DataContainerTooSmallForType.into());
         }
+        context.packet_error(slave, 0, 0, PacketError::DataContainerTooSmallForType);
+        return Err(PacketError::DataContainerTooSmallForType.into());
     }
     Ok(pdo_buffer.len())
 }
@@ -1167,7 +1184,7 @@ fn read_pdo_assign(context: &mut Context, slave: u16, pdo_assign: u16) -> Result
 
                     // Extract bitlength of SDO
                     if low_byte(read_data) < 0xFF {
-                        Ok(low_byte(read_data) as u32)
+                        Ok(u32::from(low_byte(read_data)))
                     } else {
                         // Used `readOEsingle(idx, (uint8)SubCount, pODlist, pOElist);` in old SOEM
                         // codebase, but is already outcomented in current original SOEM codebase.
@@ -1239,7 +1256,7 @@ fn read_pdo_assign_complete_access(
                 .pdo
                 .iter()
                 .copied()
-                .map(|long| low_byte(ethercat_to_host(Ethercat::from_raw(long)) as u16) as u32)
+                .map(|long| u32::from(low_byte(ethercat_to_host(Ethercat::from_raw(long)) as u16)))
                 .sum::<u32>();
 
             context.pdo_description[thread_number] = pdo_description;
@@ -1278,6 +1295,11 @@ fn read_pdo_assign_complete_access(
 /// - `slave`: Slave number
 /// - `output_size`: Size in bits of output mapping (rxPDO) found
 /// - `input_size`: Size in bits of input mapping (txPDO) found
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Received data couldn't be parsed into an object
 ///
 /// # Returns
 /// Unit if successful, error otherwise
@@ -1398,6 +1420,11 @@ pub fn read_pdo_map(
 /// - `output_size`: Size in bits of output mapping (rxPDO) found
 /// - `input_size`: Size in bits of input mapping (txPDO) found
 ///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Received data couldn't be parsed into an object
+///
 /// # Returns
 /// Unit or error
 pub fn read_pdo_map_complete_access(
@@ -1510,6 +1537,11 @@ pub fn read_pdo_map_complete_access(
 /// - `context`: context struct
 /// - `slave`: slave number
 ///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+///
+///
 /// # Returns
 /// Unit or error
 pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescriptionList, CoEError> {
@@ -1541,10 +1573,11 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
     sdo.fragments = Ethercat::default();
 
     // All objects
-    sdo.data.set_word(0, host_to_ethercat(1));
+    sdo.data
+        .set_word_compile_time_checked::<0>(host_to_ethercat(1));
 
     // Send get object description list request to slave
-    sdo.write_to(&mut mailbox_out).unwrap();
+    sdo.write_to(&mut mailbox_out)?;
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     let mut a_sdo;
@@ -1610,8 +1643,9 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
             // Got unexpected response from slave
             if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
                 // SDO info error received
-                let abort_error =
-                    AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
+                let abort_error = AbortError::Abort(ethercat_to_host(
+                    a_sdo.data.get_long_compile_time_checked::<0>(),
+                ) as i32);
                 sdo_info_error(context, slave, 0, 0, abort_error);
                 result = Err(abort_error.into());
                 stop = true;
@@ -1645,6 +1679,14 @@ pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescripti
 /// - `context`: Context struct
 /// - `item`: Item number in Object  Description List
 /// - `od_list`: Referencing Object Description list
+///
+/// # Panics
+/// Panics if the name of an object entry doesn't fit in the string.
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Received data couldn't be parsed into an object
 ///
 /// # Returns
 /// Unit or error
@@ -1686,10 +1728,11 @@ pub fn read_od_description(
     sdo.fragments = Ethercat::default();
 
     // Data of index
-    sdo.data.set_word(0, host_to_ethercat(od_list.index[item]));
+    sdo.data
+        .set_word_compile_time_checked::<0>(host_to_ethercat(od_list.index[item]));
 
     // Send get request to slave
-    sdo.write_to(&mut mailbox_out).unwrap();
+    sdo.write_to(&mut mailbox_out)?;
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Read slave response
@@ -1704,7 +1747,7 @@ pub fn read_od_description(
         let object_name_length =
             (ethercat_to_host(a_sdo.mailbox_header.length) - 12).min(MAX_NAME_LENGTH);
         od_list.data_type[item] = Datatype::try_from(u8::try_from(ethercat_to_host(
-            a_sdo.data.get_word(1).unwrap(),
+            a_sdo.data.get_word_compile_time_checked::<1>(),
         ))?)?;
         od_list.object_code[item] = u16::from(a_sdo.data.as_bytes()[5]);
         od_list.max_sub[item] = a_sdo.data.as_bytes()[4];
@@ -1719,19 +1762,19 @@ pub fn read_od_description(
 
         // SDO info error received
         if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
-            let abort_error =
-                AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
+            let abort_error = AbortError::Abort(ethercat_to_host(
+                a_sdo.data.get_long_compile_time_checked::<0>(),
+            ) as i32);
             sdo_info_error(context, slave, od_list.index[item], 0, abort_error);
             return Err(abort_error.into());
-        } else {
-            context.packet_error(
-                slave,
-                od_list.index[item],
-                0,
-                PacketError::UnexpectedFrameReturned,
-            );
-            return Err(PacketError::UnexpectedFrameReturned.into());
         }
+        context.packet_error(
+            slave,
+            od_list.index[item],
+            0,
+            PacketError::UnexpectedFrameReturned,
+        );
+        return Err(PacketError::UnexpectedFrameReturned.into());
     }
     Ok(())
 }
@@ -1743,8 +1786,16 @@ pub fn read_od_description(
 /// - `context`: Context struct
 /// - `item`: Item in Object Description List
 /// - `sub_index`: Subindex of item in Object Description List
-/// - `od_list`: Object Description list for reference
-/// - `oe_list`: Resulting object entry structure
+/// - `object_description_list`: Object Description list for reference
+/// - `object_entry_list`: Resulting object entry structure
+///
+/// # Panics
+/// Panics if the name of an object couldn't be read.
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be send/received
+/// - Read data couldn't be parsed into an object.
 ///
 /// # Returns
 /// Unit or error
@@ -1752,11 +1803,11 @@ pub fn read_oe_single(
     context: &mut Context,
     item: u16,
     sub_index: u8,
-    od_list: &mut ObjectDescriptionList,
-    oe_list: &mut ObjectEntryList,
+    object_description_list: &mut ObjectDescriptionList,
+    object_entry_list: &mut ObjectEntryList,
 ) -> Result<(), CoEError> {
-    let slave = od_list.slave;
-    let index = od_list.index[usize::from(item)];
+    let slave = object_description_list.slave;
+    let index = object_description_list.index[usize::from(item)];
     let mut mailbox_in = MailboxIn::default();
 
     // Clear pending out mailbox in slave if available, with timeout set to default.
@@ -1784,13 +1835,14 @@ pub fn read_oe_single(
 
     // Fragments left
     sdo.fragments = Ethercat::default();
-    sdo.data.set_word(0, host_to_ethercat(index));
+    sdo.data
+        .set_word_compile_time_checked::<0>(host_to_ethercat(index));
     sdo.data.as_bytes_mut()[2] = sub_index;
     // Get access rights, object category, PDO
     sdo.data.as_bytes_mut()[3] = 1 + 2 + 4;
 
     // Send get object entry description request to slave
-    sdo.write_to(&mut mailbox_out).unwrap();
+    sdo.write_to(&mut mailbox_out)?;
     mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
 
     // Read slave response
@@ -1801,22 +1853,25 @@ pub fn read_oe_single(
     if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
         && a_sdo.opcode == COEObjectDescriptionCommand::ObjectEntryResponse
     {
-        oe_list.entries += 1;
+        object_entry_list.entries += 1;
         let object_name_length = usize::from(
             (ethercat_to_host(a_sdo.mailbox_header.length) - 16).clamp(0, MAX_NAME_LENGTH),
         );
         let sub_index = usize::from(sub_index);
-        oe_list.value_info[sub_index] = a_sdo.data.as_bytes()[3];
-        oe_list.data_type[sub_index] =
-            Datatype::try_from(ethercat_to_host(a_sdo.data.get_word(2).unwrap()) as u8)?;
-        oe_list.bit_length[sub_index] = ethercat_to_host(a_sdo.data.get_word(3).unwrap());
-        oe_list.object_access[sub_index] = ethercat_to_host(a_sdo.data.get_word(4).unwrap());
-        oe_list.name[sub_index].clear();
+        object_entry_list.value_info[sub_index] = a_sdo.data.as_bytes()[3];
+        object_entry_list.data_type[sub_index] = Datatype::try_from(ethercat_to_host(
+            a_sdo.data.get_word_compile_time_checked::<2>(),
+        ) as u8)?;
+        object_entry_list.bit_length[sub_index] =
+            ethercat_to_host(a_sdo.data.get_word_compile_time_checked::<3>());
+        object_entry_list.object_access[sub_index] =
+            ethercat_to_host(a_sdo.data.get_word_compile_time_checked::<4>());
+        object_entry_list.name[sub_index].clear();
         #[expect(
             clippy::string_from_utf8_as_bytes,
             reason = "Not converted from string!"
         )]
-        oe_list.name[sub_index]
+        object_entry_list.name[sub_index]
             .push_str(str::from_utf8(
                 &a_sdo.data.as_bytes()[10..10 + object_name_length],
             )?)
@@ -1824,8 +1879,9 @@ pub fn read_oe_single(
         Ok(())
     } else if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
         // SDO info error received
-        let abort_error =
-            AbortError::Abort(ethercat_to_host(a_sdo.data.get_long(0).unwrap()) as i32);
+        let abort_error = AbortError::Abort(ethercat_to_host(
+            a_sdo.data.get_long_compile_time_checked::<0>(),
+        ) as i32);
         sdo_info_error(context, slave, index, sub_index, abort_error);
         Err(abort_error.into())
     } else {
@@ -1840,19 +1896,33 @@ pub fn read_oe_single(
 /// # Parameters
 /// - `context`: Context struct
 /// - `item`: Item in Object Description list
-/// - `od_list`: Object description list for reference
-/// - `oe_list`: Object entry structure
+/// - `object_description_list`: Object description list for reference
+/// - `object_entry_list`: Object entry structure
+///
+/// # Panics
+/// If the name of an object couldn't be read
+///
+/// # Errors
+/// Returns an error if:
+/// - A message couldn't be read/received
+/// - Read data couldn't be parsed into an object
 ///
 /// # Returns Unit or workcounter
 pub fn read_oe(
     context: &mut Context,
     item: u16,
-    od_list: &mut ObjectDescriptionList,
-    oe_list: &mut ObjectEntryList,
+    object_description_list: &mut ObjectDescriptionList,
+    object_entry_list: &mut ObjectEntryList,
 ) -> Result<(), CoEError> {
-    oe_list.entries = 0;
-    for sub_count in 0..od_list.max_sub[usize::from(item)] {
-        read_oe_single(context, item, sub_count, od_list, oe_list)?;
+    object_entry_list.entries = 0;
+    for sub_count in 0..object_description_list.max_sub[usize::from(item)] {
+        read_oe_single(
+            context,
+            item,
+            sub_count,
+            object_description_list,
+            object_entry_list,
+        )?;
     }
     Ok(())
 }
