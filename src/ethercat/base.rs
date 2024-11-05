@@ -68,17 +68,17 @@ pub fn setup_datagram(
     frame.resize(ETHERNET_HEADER_SIZE, 0).unwrap();
     frame
         .extend_from_slice(
-            EthercatHeader {
-                ethercat_length: host_to_ethercat(
+            EthercatHeader::new(
+                host_to_ethercat(
                     (usize::from(ECATTYPE) + ETHERCAT_HEADER_SIZE + data.len()) as u16,
                 ),
                 command,
                 index,
-                address_position: host_to_ethercat(address_position),
-                address_offset: host_to_ethercat(address_offset),
-                data_length: host_to_ethercat(data.len() as u16),
-                interrupt: 0,
-            }
+                host_to_ethercat(address_position),
+                host_to_ethercat(address_offset),
+                host_to_ethercat(data.len() as u16),
+                0,
+            )
             .as_ref(),
         )
         .unwrap();
@@ -129,22 +129,22 @@ pub fn add_datagram(
     let mut datagram = EthercatHeader::try_from(&frame[ETHERNET_HEADER_SIZE..]).unwrap();
 
     // Add new datargam to ethernet frame size
-    datagram.ethercat_length = host_to_ethercat(
-        (usize::from(ethercat_to_host(datagram.ethercat_length))
+    *datagram.ethercat_length_mut() = host_to_ethercat(
+        (usize::from(ethercat_to_host(datagram.ethercat_length()))
             + ETHERCAT_HEADER_SIZE
             + data.len()) as u16,
     );
-    datagram.data_length =
-        host_to_ethercat(ethercat_to_host(datagram.data_length) | DATAGRAM_FOLLOWS);
+    *datagram.data_length_mut() =
+        host_to_ethercat(ethercat_to_host(datagram.data_length()) | DATAGRAM_FOLLOWS);
     frame[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
 
     // Set new EtherCAT header position
     datagram = EthercatHeader::try_from(&frame[previous_length - ETHERCAT_LENGTH_SIZE..]).unwrap();
-    datagram.command = command;
-    datagram.index = index;
-    datagram.address_position = host_to_ethercat(address_position);
-    datagram.address_offset = host_to_ethercat(address_offset);
-    datagram.data_length = host_to_ethercat(if more {
+    *datagram.command_mut() = command;
+    *datagram.index_mut() = index;
+    *datagram.address_position_mut() = host_to_ethercat(address_position);
+    *datagram.address_offset_mut() = host_to_ethercat(address_offset);
+    *datagram.data_length_mut() = host_to_ethercat(if more {
         // This is not the last datagram to add
         data.len() as u16 | DATAGRAM_FOLLOWS
     } else {
@@ -191,7 +191,7 @@ fn execute_primitive_command(
 
     // Setup datagram
     setup_datagram(
-        &mut port.tx_buffers.lock().unwrap()[usize::from(index)],
+        &mut port.tx_buffers_mut()[usize::from(index)],
         command,
         index,
         address_position,
@@ -218,9 +218,11 @@ fn execute_primitive_command(
         | CommandType::LogicalRead
         | CommandType::LogicalReadWrite
         | CommandType::AutoReadMultipleWrite
-        | CommandType::FixedReadMultipleWrite => data.copy_from_slice(
-            &port.rx_buf.lock().unwrap()[usize::from(index)][ETHERCAT_HEADER_SIZE..],
-        ),
+        | CommandType::FixedReadMultipleWrite => {
+            data.copy_from_slice(
+                &port.rx_buffers_mut()[usize::from(index)][ETHERCAT_HEADER_SIZE..],
+            );
+        }
     }
 
     // Clear buffer status
@@ -775,7 +777,7 @@ pub fn lrwdc(
 ) -> Result<u16, NicdrvError> {
     let index = port.get_index();
     let distributed_clock_offset = {
-        let tx_buffer = &mut port.tx_buffers.lock().unwrap()[usize::from(index)];
+        let tx_buffer = &mut port.tx_buffers_mut()[usize::from(index)];
 
         // Logical read write in first datagram
         setup_datagram(
@@ -802,7 +804,7 @@ pub fn lrwdc(
 
     let mut wkc = port.src_confirm(index, timeout).unwrap();
     {
-        let rx_buffer = &mut port.rx_buf.lock().unwrap()[usize::from(index)];
+        let rx_buffer = &mut port.rx_buffers_mut()[usize::from(index)];
         if rx_buffer[ETHERCAT_COMMAND_OFFET] == CommandType::LogicalReadWrite.into() {
             let mut response_iter = rx_buffer[ETHERCAT_HEADER_SIZE..].iter();
             data.iter_mut()

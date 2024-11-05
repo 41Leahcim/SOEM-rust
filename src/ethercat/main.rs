@@ -8,12 +8,9 @@
 
 use std::{
     array,
+    ffi::CStr,
     io::{self, Read, Write},
-    str::Utf8Error,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    str::{FromStr, Utf8Error},
     thread,
     time::{Duration, SystemTime},
 };
@@ -24,9 +21,11 @@ use oshw::nicdrv::{Port, RedPort};
 
 use super::{
     base::{aprd, brd, bwr, fpwr, fpwrw},
+    dc::DistributedClock,
     r#type::{
-        host_to_ethercat, AbortError, ErrorInfo, ErrorType, Ethercat, EthercatState, SiiCategory,
-        SiiGeneralItem, DEFAULT_RETRIES, EEPROM_STATE_MACHINE_BUSY, MAX_BUF_COUNT, TIMEOUT_RETURN,
+        host_to_ethercat, AbortError, ErrorType, Ethercat, EthercatState, SiiCategory,
+        SiiGeneralItem, DEFAULT_RETRIES, EEPROM_STATE_MACHINE_BUSY, ETHERCAT_COMMAND_OFFET,
+        MAX_BUF_COUNT, TIMEOUT_RETURN,
     },
 };
 use crate::{
@@ -103,6 +102,7 @@ pub enum MainError {
     MissedTooManyAcks,
     EepromBusy,
     NoIOFound,
+    NoFrame,
 }
 
 impl From<io::Error> for MainError {
@@ -125,8 +125,8 @@ impl From<Utf8Error> for MainError {
 
 /// EtherCAT Adapter
 pub struct Adapter {
-    pub name: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
-    pub desc: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
+    name: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
+    desc: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
 }
 
 /// Create list of available network adapters
@@ -134,24 +134,92 @@ pub struct Adapter {
 /// # Returns
 /// List of available network adapters
 impl Adapter {
-    pub fn find_adapters() -> Vec<Self> {
-        oshw::find_adaters()
+    /// Create list over available network adapters.
+    ///
+    /// # Panics
+    /// Panics if the name of an interface is too long
+    ///
+    /// # Returns
+    /// First element in linked list of adapters
+    pub fn find_adaters() -> Vec<Adapter> {
+        use libc::if_nameindex;
+        // Iterate all devices and create a local copy holding the name and description
+        let ids = unsafe { if_nameindex() };
+        (0..usize::MAX)
+            .filter_map(|i| unsafe { ids.add(i).as_mut() })
+            .take_while(|id| id.if_index != 0)
+            .map(|id| {
+                // Fetch description and name, in Linux they are the same.
+                let name = heapless::String::from_str(
+                    unsafe { CStr::from_ptr(id.if_name) }.to_str().unwrap(),
+                )
+                .unwrap();
+                let desc = name.clone();
+                Adapter { name, desc }
+            })
+            .collect()
     }
 }
 
 /// Fieldbus Memory Management Unit
 #[derive(Debug, Clone, Copy)]
 pub struct Fmmu {
-    pub log_start: Ethercat<u32>,
-    pub log_length: Ethercat<u16>,
-    pub log_start_bit: u8,
-    pub log_end_bit: u8,
-    pub physical_start: Ethercat<u16>,
-    pub physical_start_bit: u8,
-    pub fmmu_type: u8,
-    pub fmmu_active: u8,
-    pub unused: u8,
-    pub unused2: Ethercat<u16>,
+    log_start: Ethercat<u32>,
+    log_length: Ethercat<u16>,
+    log_start_bit: u8,
+    log_end_bit: u8,
+    physical_start: Ethercat<u16>,
+    physical_start_bit: u8,
+    fmmu_type: u8,
+    fmmu_active: bool,
+    unused: u8,
+    unused2: Ethercat<u16>,
+}
+
+impl Fmmu {
+    pub const fn log_start(&self) -> Ethercat<u32> {
+        self.log_start
+    }
+
+    pub fn log_start_mut(&mut self) -> &mut Ethercat<u32> {
+        &mut self.log_start
+    }
+
+    pub const fn log_length(&self) -> Ethercat<u16> {
+        self.log_length
+    }
+
+    pub fn log_length_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.log_length
+    }
+
+    pub const fn log_start_bit(&self) -> u8 {
+        self.log_start_bit
+    }
+
+    pub fn log_start_bit_mut(&mut self) -> &mut u8 {
+        &mut self.log_start_bit
+    }
+
+    pub fn log_end_bit_mut(&mut self) -> &mut u8 {
+        &mut self.log_end_bit
+    }
+
+    pub fn physical_start_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.physical_start
+    }
+
+    pub fn physical_start_bit_mut(&mut self) -> &mut u8 {
+        &mut self.physical_start_bit
+    }
+
+    pub fn fmmu_type_mut(&mut self) -> &mut u8 {
+        &mut self.fmmu_type
+    }
+
+    pub fn fmmu_active_mut(&mut self) -> &mut bool {
+        &mut self.fmmu_active
+    }
 }
 
 #[expect(unsafe_code)]
@@ -171,9 +239,35 @@ impl<'fmmu> From<&'fmmu mut Fmmu> for &'fmmu mut [u8] {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SyncManager {
-    pub start_address: Ethercat<u16>,
-    pub sm_length: Ethercat<u16>,
-    pub sm_flags: Ethercat<u32>,
+    start_address: Ethercat<u16>,
+    sm_length: Ethercat<u16>,
+    sm_flags: Ethercat<u32>,
+}
+
+impl SyncManager {
+    pub const fn start_address(&self) -> Ethercat<u16> {
+        self.start_address
+    }
+
+    pub fn start_address_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.start_address
+    }
+
+    pub fn sm_flags_mut(&mut self) -> &mut Ethercat<u32> {
+        &mut self.sm_flags
+    }
+
+    pub const fn sm_flags(&self) -> Ethercat<u32> {
+        self.sm_flags
+    }
+
+    pub fn sm_length_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.sm_length
+    }
+
+    pub const fn sm_length(&self) -> Ethercat<u16> {
+        self.sm_length
+    }
 }
 
 #[expect(unsafe_code)]
@@ -192,9 +286,9 @@ impl<'sm> From<&'sm mut SyncManager> for &'sm mut [u8] {
 }
 
 pub struct StateStatus {
-    pub state: u16,
-    pub unused: u16,
-    pub al_status_code: u16,
+    state: u16,
+    unused: u16,
+    al_status_code: u16,
 }
 
 pub enum MailboxProtocol {
@@ -297,229 +391,715 @@ pub enum EepromControl {
     Pdi,
 }
 
+pub struct SlaveEeprom {
+    manufacturer: u32,
+    id: u32,
+    revision: u32,
+
+    /// The amount of data per read from EEPROM
+    read_size: EepReadSize,
+
+    control: EepromControl,
+}
+
+impl SlaveEeprom {
+    pub const fn manufacturer(&self) -> u32 {
+        self.manufacturer
+    }
+
+    pub fn manufacturer_mut(&mut self) -> &mut u32 {
+        &mut self.manufacturer
+    }
+
+    pub const fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn id_mut(&mut self) -> &mut u32 {
+        &mut self.id
+    }
+
+    pub const fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    pub fn revision_mut(&mut self) -> &mut u32 {
+        &mut self.revision
+    }
+
+    pub fn read_size_mut(&mut self) -> &mut EepReadSize {
+        &mut self.read_size
+    }
+
+    pub const fn control(&self) -> EepromControl {
+        self.control
+    }
+
+    pub fn control_mut(&mut self) -> &mut EepromControl {
+        &mut self.control
+    }
+}
+
+pub struct SlaveMailbox {
+    /// Length of write mailbox in bytes, 0 if no mailbox
+    length: u16,
+
+    write_offset: u16,
+
+    // Length of read mailbox in bytes
+    read_length: u16,
+
+    read_offset: u16,
+
+    /// Supported mailbox protocols
+    protocols: u16,
+
+    /// Counter value of mailbox link layer protocol 1..7
+    count: u8,
+}
+
+impl SlaveMailbox {
+    pub const fn length(&self) -> u16 {
+        self.length
+    }
+
+    pub fn length_mut(&mut self) -> &mut u16 {
+        &mut self.length
+    }
+
+    pub const fn write_offset(&self) -> u16 {
+        self.write_offset
+    }
+
+    pub fn read_length_mut(&mut self) -> &mut u16 {
+        &mut self.read_length
+    }
+
+    pub const fn read_length(&self) -> u16 {
+        self.read_length
+    }
+
+    pub fn read_offset_mut(&mut self) -> &mut u16 {
+        &mut self.read_offset
+    }
+
+    pub const fn read_offset(&self) -> u16 {
+        self.read_offset
+    }
+
+    pub fn protocols_mut(&mut self) -> &mut u16 {
+        &mut self.protocols
+    }
+
+    pub const fn protocols(&self) -> u16 {
+        self.protocols
+    }
+
+    pub const fn mailbox_count(&self) -> u8 {
+        self.count
+    }
+
+    /// Sets and returns index of next mailbox counter value.
+    /// Used for Mailbox Link Layer.
+    ///
+    /// # Returns next mailbox counter value
+    pub fn next_count(&mut self) -> u8 {
+        // Wraps around to 1, not 0 for a range of 1..=7
+        self.count = self.count % 7 + 1;
+        self.count
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProtocolDetails {
+    canopen_over_ethercat: u8,
+    file_over_ethercat: u8,
+    ethernet_over_ethercat: u8,
+    servo_over_ethercat: u8,
+}
+
+impl ProtocolDetails {
+    pub const fn canopen_over_ethercat(&self) -> u8 {
+        self.canopen_over_ethercat
+    }
+
+    pub fn canopen_over_ethercat_mut(&mut self) -> &mut u8 {
+        &mut self.canopen_over_ethercat
+    }
+
+    pub const fn file_over_ethercat(&self) -> u8 {
+        self.file_over_ethercat
+    }
+
+    pub fn file_over_ethercat_mut(&mut self) -> &mut u8 {
+        &mut self.file_over_ethercat
+    }
+
+    pub const fn ethernet_over_ethercat(&self) -> u8 {
+        self.ethernet_over_ethercat
+    }
+
+    pub fn ethernet_over_ethercat_mut(&mut self) -> &mut u8 {
+        &mut self.ethernet_over_ethercat
+    }
+
+    pub const fn servo_over_ethercat(&self) -> u8 {
+        self.servo_over_ethercat
+    }
+
+    pub fn servo_over_ethercat_mut(&mut self) -> &mut u8 {
+        &mut self.servo_over_ethercat
+    }
+}
+
 /// Detected EtherCAT slave
 pub struct Slave<'slave> {
     /// State of slave
-    pub state: EthercatState,
+    state: EthercatState,
 
     /// Application layer status code
-    pub al_status_code: u16,
+    al_status_code: u16,
 
     /// Configured address
-    pub config_address: u16,
+    config_address: u16,
 
     /// Alias address
-    pub alias_address: u16,
+    alias_address: u16,
 
     /// Manufacturer from EEprom
-    pub eep_manufacturer: u32,
+    eep: SlaveEeprom,
 
-    /// EEProm ID
-    pub eep_id: u32,
-
-    /// EEProm revision
-    pub eep_revision: u32,
-
-    pub interface_type: u16,
-    pub output_bits: u16,
+    interface_type: u16,
+    output_bits: u16,
 
     /// Output bytes, if output_bits < 8, output_bytes = 0
-    pub output_bytes: u16,
+    output_bytes: u16,
 
-    /// Output IOmap buffer
-    pub outputs: &'slave [u8],
+    /// IOmap buffer
+    io_map: &'slave [u8],
+    input_offset: u32,
 
     /// Startbit in first output byte
-    pub output_startbit: u8,
+    output_startbit: u8,
 
-    pub input_bits: u16,
+    input_bits: u16,
 
     /// Input bytes, if input_bits < 8, output_bytes = 0
-    pub input_bytes: u16,
-
-    /// Input IOmap buffer
-    pub input: Option<&'slave [u8]>,
+    input_bytes: u16,
 
     /// Startbit in IOmap buffer
-    pub input_startbit: u8,
+    input_startbit: u8,
 
-    pub sync_manager: [SyncManager; MAX_SM as usize],
-    pub sync_manager_type: [SyncManagerType; MAX_SM as usize],
+    sync_manager: [SyncManager; MAX_SM as usize],
+    sync_manager_type: [SyncManagerType; MAX_SM as usize],
 
     /// Fieldbus Memory Management Units
-    pub fmmu: [Fmmu; MAX_FMMU],
+    fmmu: [Fmmu; MAX_FMMU],
 
     /// Fieldbus Memory Management Unit 0 function
-    pub fmmu0_function: u8,
+    fmmu0_function: u8,
 
     /// Fieldbus Memory Management Unit 1 function
-    pub fmmu1_function: u8,
+    fmmu1_function: u8,
 
     /// Fieldbus Memory Management Unit 2 function
-    pub fmmu2_function: u8,
+    fmmu2_function: u8,
 
     /// Fieldbus Memory Management Unit 3 function
-    pub fmmu3_function: u8,
+    fmmu3_function: u8,
 
-    /// Length of write mailbox in bytes, 0 if no mailbox
-    pub mailbox_length: u16,
+    mailbox: SlaveMailbox,
 
-    pub mailbox_write_offset: u16,
-
-    // Length of read mailbox in bytes
-    pub mailbox_read_length: u16,
-    pub mailbox_read_offset: u16,
-
-    /// Supported mailbox protocols
-    pub mailbox_protocols: u16,
-
-    /// Counter value of mailbox link layer protocol 1..7
-    pub mailbox_count: u8,
-
-    /// Has DC capability
-    pub has_dc: bool,
+    /// Distributed clock if slave has DC capability
+    distributed_clock: Option<DistributedClock>,
 
     /// Physical type: Ebus Ethernet combinations
-    pub physical_type: u8,
+    physical_type: u8,
 
     /// Topology: 1 to 3 links
-    pub topology: u8,
+    topology: u8,
 
     /// Active ports bitmap: ....3210, set if respective port is active
-    pub active_ports: u8,
+    active_ports: u8,
 
     /// Consumed ports bitmap: ...3210, used for internal delay measurement
-    pub consumed_ports: u8,
+    consumed_ports: u8,
 
     /// Slave number for parent, 0=master
-    pub slave_number_for_parent: u8,
+    slave_number_for_parent: u8,
 
     /// Port number on parent this slave is connected to
-    pub parent_port: u8,
+    parent_port: u8,
 
     // 0 = master
-    pub parent: u8,
+    parent: u8,
 
     /// Port number on this slave the parent is connected to
-    pub entry_port: u8,
+    entry_port: u8,
 
-    /// DC receivetimes on port A
-    pub dc_rt_a: Duration,
-
-    /// DC receivetimes on port B
-    pub dc_rt_b: Duration,
-
-    /// DC receivetimes on port C
-    pub dc_rt_c: Duration,
-
-    /// DC receivetimes on port D
-    pub dc_rt_d: Duration,
-
-    pub propagation_delay: Duration,
-
-    /// Next DC slave
-    pub dc_next: u16,
-
-    /// Previous DC slave
-    pub dc_previous: u16,
-
-    /// DC cycle received in nanoseconds
-    pub dc_cycle: Duration,
-
-    /// DC shift from clock modulus boundary
-    pub dc_shift: i32,
-
-    /// DC sync activation
-    pub dc_active: bool,
+    propagation_delay: Duration,
 
     /// Link to config table
-    pub config_index: u16,
+    config_index: u16,
 
     /// Link to SII config
-    pub sii_index: u16,
+    sii_index: u16,
 
-    /// The amount of data per read from EEPROM
-    pub eep_read_size: EepReadSize,
-
-    /// False for eeprom to master, true for eeprom to PDI
-    pub eep_pdi: EepromControl,
-
-    pub canopen_over_ethercat_details: u8,
-    pub file_over_ethercat_details: u8,
-    pub ethernet_over_ethercat_details: u8,
-    pub servo_over_ethercat_details: u8,
+    protocol_details: ProtocolDetails,
 
     /// E-bus current
-    pub ebus_current: u16,
+    ebus_current: u16,
 
     /// If > 0 block use of LRW in processdata
-    pub block_logical_read_write: u8,
+    block_logical_read_write: u8,
 
-    pub group: u8,
+    group: u8,
 
     /// First unused Fieldbus Memory Management Unit
-    pub fmmu_unused: u8,
+    fmmu_unused: u8,
 
     /// Whether the slave is responding, not used by the SOEM library
-    pub is_lost: SlaveResponding,
+    is_lost: SlaveResponding,
 
     /// Registered configuration function PO -> SO (DEPRECATED)
-    pub po2_so_config: Option<fn(slave: u16) -> i32>,
+    po2_so_config: Option<fn(slave: u16) -> i32>,
 
     /// Registered configuration function PO->SO
-    pub po2_so_configx: Option<fn(context: &mut Context, slave: u16) -> i32>,
+    po2_so_configx: Option<fn(context: &mut Context, slave: u16) -> i32>,
 
-    pub name: HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }>,
+    name: HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }>,
+}
+
+impl<'slave> Slave<'slave> {
+    pub const fn propagation_delay(&self) -> Duration {
+        self.propagation_delay
+    }
+
+    pub fn propagation_delay_mut(&mut self) -> &mut Duration {
+        &mut self.propagation_delay
+    }
+
+    pub const fn active_ports(&self) -> u8 {
+        self.active_ports
+    }
+
+    pub const fn consumed_ports(&self) -> u8 {
+        self.consumed_ports
+    }
+
+    pub fn consumed_ports_mut(&mut self) -> &mut u8 {
+        &mut self.consumed_ports
+    }
+
+    pub fn entry_port_mut(&mut self) -> &mut u8 {
+        &mut self.entry_port
+    }
+
+    pub const fn entry_port(&self) -> u8 {
+        self.entry_port
+    }
+
+    pub const fn distributed_clock(&self) -> Option<&DistributedClock> {
+        self.distributed_clock.as_ref()
+    }
+
+    pub fn distributed_clock_mut(&mut self) -> Option<&mut DistributedClock> {
+        self.distributed_clock.as_mut()
+    }
+
+    pub fn set_distributed_clock(&mut self, clock: DistributedClock) {
+        self.distributed_clock = Some(clock);
+    }
+
+    pub fn remove_distributed_clock(&mut self) {
+        self.distributed_clock = None;
+    }
+
+    pub const fn alias_address(&self) -> u16 {
+        self.alias_address
+    }
+
+    pub fn input_startbit_mut(&mut self) -> &mut u8 {
+        &mut self.input_startbit
+    }
+
+    pub const fn input_startbit(&self) -> u8 {
+        self.input_startbit
+    }
+
+    pub fn input_bytes_mut(&mut self) -> &mut u16 {
+        &mut self.input_bytes
+    }
+
+    pub const fn output_bytes(&self) -> u16 {
+        self.output_bytes
+    }
+
+    pub fn output_bytes_mut(&mut self) -> &mut u16 {
+        &mut self.output_bytes
+    }
+
+    pub const fn state(&self) -> EthercatState {
+        self.state
+    }
+
+    pub const fn eeprom(&self) -> &SlaveEeprom {
+        &self.eep
+    }
+
+    pub fn eeprom_mut(&mut self) -> &mut SlaveEeprom {
+        &mut self.eep
+    }
+
+    pub const fn mailbox(&self) -> &SlaveMailbox {
+        &self.mailbox
+    }
+
+    pub fn mailbox_mut(&mut self) -> &mut SlaveMailbox {
+        &mut self.mailbox
+    }
+
+    pub fn sync_manager_type_mut(&mut self) -> &mut [SyncManagerType; MAX_SM as usize] {
+        &mut self.sync_manager_type
+    }
+
+    pub fn get_sync_manager_type_mut(&mut self, sync_manager_index: u8) -> &mut SyncManagerType {
+        &mut self.sync_manager_type[usize::from(sync_manager_index)]
+    }
+
+    pub fn get_sync_manager_type(&self, sync_manager_index: u8) -> SyncManagerType {
+        self.sync_manager_type[usize::from(sync_manager_index)]
+    }
+
+    pub fn get_sync_manager(&self, sync_manager_index: u8) -> SyncManager {
+        self.sync_manager[usize::from(sync_manager_index)]
+    }
+
+    pub fn get_sync_manager_mut(&mut self, sync_manager_index: u8) -> &mut SyncManager {
+        &mut self.sync_manager[usize::from(sync_manager_index)]
+    }
+
+    pub const fn protocol_details(&self) -> ProtocolDetails {
+        self.protocol_details
+    }
+
+    pub fn protocol_details_mut(&mut self) -> &mut ProtocolDetails {
+        &mut self.protocol_details
+    }
+
+    pub const fn block_logical_read_write(&self) -> u8 {
+        self.block_logical_read_write
+    }
+
+    pub fn block_logical_read_write_mut(&mut self) -> &mut u8 {
+        &mut self.block_logical_read_write
+    }
+
+    pub const fn ebus_current(&self) -> u16 {
+        self.ebus_current
+    }
+
+    pub fn ebus_current_mut(&mut self) -> &mut u16 {
+        &mut self.ebus_current
+    }
+
+    pub const fn name(&self) -> &HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }> {
+        &self.name
+    }
+
+    pub fn name_mut(&mut self) -> &mut HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }> {
+        &mut self.name
+    }
+
+    pub const fn fmmu0_function(&self) -> u8 {
+        self.fmmu0_function
+    }
+
+    pub fn fmmu0_function_mut(&mut self) -> &mut u8 {
+        &mut self.fmmu0_function
+    }
+
+    pub const fn fmmu1_function(&self) -> u8 {
+        self.fmmu1_function
+    }
+
+    pub fn fmmu1_function_mut(&mut self) -> &mut u8 {
+        &mut self.fmmu1_function
+    }
+
+    pub const fn fmmu2_function(&self) -> u8 {
+        self.fmmu2_function
+    }
+
+    pub fn fmmu2_function_mut(&mut self) -> &mut u8 {
+        &mut self.fmmu2_function
+    }
+
+    pub const fn fmmu3_function(&self) -> u8 {
+        self.fmmu3_function
+    }
+
+    pub fn fmmu3_function_mut(&mut self) -> &mut u8 {
+        &mut self.fmmu3_function
+    }
+
+    pub fn interface_type_mut(&mut self) -> &mut u16 {
+        &mut self.interface_type
+    }
+
+    pub fn config_address_mut(&mut self) -> &mut u16 {
+        &mut self.config_address
+    }
+
+    pub const fn config_address(&self) -> u16 {
+        self.config_address
+    }
+
+    pub fn alias_address_mut(&mut self) -> &mut u16 {
+        &mut self.alias_address
+    }
+
+    pub fn physical_type_mut(&mut self) -> &mut u8 {
+        &mut self.physical_type
+    }
+
+    pub const fn topology(&self) -> u8 {
+        self.topology
+    }
+
+    pub fn topology_mut(&mut self) -> &mut u8 {
+        &mut self.topology
+    }
+
+    pub fn active_ports_mut(&mut self) -> &mut u8 {
+        &mut self.active_ports
+    }
+
+    pub const fn parent_port(&self) -> u8 {
+        self.parent_port
+    }
+
+    pub fn parent_port_mut(&mut self) -> &mut u8 {
+        &mut self.parent_port
+    }
+
+    pub const fn parent(&self) -> u8 {
+        self.parent
+    }
+
+    pub fn parent_mut(&mut self) -> &mut u8 {
+        &mut self.parent
+    }
+
+    pub const fn output_bits(&self) -> u16 {
+        self.output_bits
+    }
+
+    pub fn output_bits_mut(&mut self) -> &mut u16 {
+        &mut self.output_bits
+    }
+
+    pub const fn input_bits(&self) -> u16 {
+        self.input_bits
+    }
+
+    pub fn input_bits_mut(&mut self) -> &mut u16 {
+        &mut self.input_bits
+    }
+
+    pub const fn po2_so_config(&self) -> Option<fn(u16) -> i32> {
+        self.po2_so_config
+    }
+
+    pub const fn po2_so_configx(&self) -> Option<fn(context: &mut Context, u16) -> i32> {
+        self.po2_so_configx
+    }
+
+    pub const fn config_index(&self) -> u16 {
+        self.config_index
+    }
+
+    pub const fn group(&self) -> u8 {
+        self.group
+    }
+
+    pub const fn fmmu(&self) -> &[Fmmu; MAX_FMMU] {
+        &self.fmmu
+    }
+
+    pub fn get_fmmu(&self, index: u8) -> Fmmu {
+        self.fmmu[usize::from(index)]
+    }
+
+    pub fn get_fmmu_mut(&mut self, index: u8) -> &mut Fmmu {
+        &mut self.fmmu[usize::from(index)]
+    }
+
+    pub const fn fmmu_unused(&self) -> u8 {
+        self.fmmu_unused
+    }
+
+    pub fn fmmu_unused_mut(&mut self) -> &mut u8 {
+        &mut self.fmmu_unused
+    }
+
+    pub const fn input_bytes(&self) -> u16 {
+        self.input_bytes
+    }
+
+    pub fn input(&self) -> Option<&[u8]> {
+        self.io_map
+            .get(usize::from(self.output_bytes) + self.input_offset as usize..)
+    }
+
+    pub fn input_offset_mut(&mut self) -> &mut u32 {
+        &mut self.input_offset
+    }
+
+    pub fn outputs(&self) -> &'slave [u8] {
+        &self.io_map[..usize::from(self.output_bytes)]
+    }
+
+    pub fn io_map_mut(&mut self) -> &mut &'slave [u8] {
+        &mut self.io_map
+    }
 }
 
 ///EtherCAT slave group
 #[derive(Debug)]
 pub struct SlaveGroup<'io_map> {
     /// Logical start address for this group
-    pub logical_start_address: u32,
+    logical_start_address: u32,
 
     /// Output bytes, 0 if output bits < 0
-    pub output_bytes: u32,
+    output_bytes: u32,
 
-    /// Output IOmap buffer
-    pub outputs: &'io_map [u8],
+    /// IOmap buffer
+    io_map: &'io_map [u8],
 
     /// Input bytes, 0 if input bits < 8
-    pub input_bytes: u32,
-
-    /// Input IOmap buffer
-    pub inputs: &'io_map [u8],
-
-    /// Has DC capability
-    pub has_dc: bool,
+    input_bytes: u32,
 
     /// Next DC slave
-    pub dc_next: u16,
+    dc_next: Option<u16>,
 
     /// E-bus current
-    pub ebus_current: u16,
+    ebus_current: u16,
 
     /// If >0 block use of logical read write in process data
-    pub block_logical_read_write: u8,
+    block_logical_read_write: u8,
 
     /// Number of used IO segments
-    pub used_segment_count: u16,
+    used_segment_count: u16,
 
-    pub first_input_segment: u16,
+    first_input_segment: u16,
 
     /// Offset in input segment
-    pub input_offset: u16,
+    input_offset: u16,
 
     /// Expected workcounter outputs
-    pub work_counter_outputs: u16,
+    work_counter_outputs: u16,
 
     /// Expected workcounter inputs
-    pub work_counter_inputs: u16,
+    work_counter_inputs: u16,
 
-    pub check_slaves_states: bool,
+    check_slaves_states: bool,
 
     /// OI segmentation list. Datagrams must not break SM in two.
-    pub io_segments: [u32; MAX_IO_SEGMENTS],
+    io_segments: [u32; MAX_IO_SEGMENTS],
+}
+
+impl<'io_map> SlaveGroup<'io_map> {
+    pub fn with_logical_start_address(logical_start_address: u32) -> Self {
+        Self {
+            logical_start_address,
+            ..Default::default()
+        }
+    }
+
+    pub const fn logical_start_address(&self) -> u32 {
+        self.logical_start_address
+    }
+
+    pub const fn output_bytes(&self) -> u32 {
+        self.output_bytes
+    }
+
+    pub fn output_bytes_mut(&mut self) -> &mut u32 {
+        &mut self.output_bytes
+    }
+
+    pub fn io_map_mut(&mut self) -> &mut &'io_map [u8] {
+        &mut self.io_map
+    }
+
+    pub const fn io_map(&self) -> &'io_map [u8] {
+        self.io_map
+    }
+
+    pub const fn input_bytes(&self) -> u32 {
+        self.input_bytes
+    }
+
+    pub fn input_bytes_mut(&mut self) -> &mut u32 {
+        &mut self.input_bytes
+    }
+
+    pub fn inputs(&mut self) -> &'io_map [u8] {
+        &self.io_map[self.output_bytes as usize..]
+    }
+
+    pub fn outputs(&self) -> &'io_map [u8] {
+        &self.io_map[..self.output_bytes as usize]
+    }
+
+    pub fn remove_distributed_clock(&mut self) {
+        self.dc_next = None;
+    }
+
+    pub fn set_distributed_clock_next(&mut self, next: u16) {
+        self.dc_next = Some(next);
+    }
+
+    pub const fn has_distributed_clock(&self) -> bool {
+        self.dc_next.is_some()
+    }
+
+    pub fn work_counter_inputs_mut(&mut self) -> &mut u16 {
+        &mut self.work_counter_inputs
+    }
+
+    pub fn ebus_current_mut(&mut self) -> &mut u16 {
+        &mut self.ebus_current
+    }
+
+    pub fn block_logical_read_write_mut(&mut self) -> &mut u8 {
+        &mut self.block_logical_read_write
+    }
+
+    pub const fn used_segment_count(&self) -> u16 {
+        self.used_segment_count
+    }
+
+    pub fn used_segment_count_mut(&mut self) -> &mut u16 {
+        &mut self.used_segment_count
+    }
+
+    pub fn first_input_segment_mut(&mut self) -> &mut u16 {
+        &mut self.first_input_segment
+    }
+
+    pub fn input_offset_mut(&mut self) -> &mut u16 {
+        &mut self.input_offset
+    }
+
+    pub fn work_counter_outputs_mut(&mut self) -> &mut u16 {
+        &mut self.work_counter_outputs
+    }
+
+    pub fn get_io_segment_mut(&mut self, segment: u16) -> &mut u32 {
+        &mut self.io_segments[usize::from(segment)]
+    }
 }
 
 impl<'io_map> Default for SlaveGroup<'io_map> {
@@ -528,11 +1108,9 @@ impl<'io_map> Default for SlaveGroup<'io_map> {
         Self {
             logical_start_address: 0,
             output_bytes: 0,
-            outputs: STATIC_SLICE,
+            io_map: STATIC_SLICE,
             input_bytes: 0,
-            inputs: STATIC_SLICE,
-            has_dc: false,
-            dc_next: 0,
+            dc_next: None,
             ebus_current: 0,
             block_logical_read_write: 0,
             used_segment_count: 0,
@@ -567,12 +1145,20 @@ impl Eeprom {
 /// Eeprom Fieldbus Memory Management Unit
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EepromFmmu {
-    pub start_position: u16,
-    pub number_fmmu: u8,
-    pub fmmu: [u8; 4],
+    start_position: u16,
+    number_fmmu: u8,
+    fmmu: [u8; 4],
 }
 
 impl EepromFmmu {
+    pub const fn fmmu_count(&self) -> u8 {
+        self.number_fmmu
+    }
+
+    pub const fn fmmu(&self) -> &[u8; 4] {
+        &self.fmmu
+    }
+
     /// Get FMMU data from SII FMMU section in slave EEPROM
     ///
     /// # Parameters
@@ -588,7 +1174,7 @@ impl EepromFmmu {
     /// FMMU struct from SII (maximum is 4 FMMU's)
     pub fn sii_fmmu(context: &mut Context, slave: u16) -> Result<Self, MainError> {
         let slave_usize = usize::from(slave);
-        let eeprom_control = context.slavelist[slave_usize].eep_pdi;
+        let eeprom_control = context.slavelist[slave_usize].eeprom().control();
 
         let mut number_fmmu = 0;
         let mut fmmu = [0; 4];
@@ -621,19 +1207,41 @@ impl EepromFmmu {
 
 #[derive(Debug, Clone, Default)]
 pub struct EepromSyncManager {
-    pub start_position: u16,
-    pub sync_manager_count: u8,
-    pub phase_start: u16,
-    pub phase_length: u16,
-    pub control_register: u8,
+    start_position: u16,
+    sync_manager_count: u8,
+    phase_start: u16,
+    phase_length: u16,
+    control_register: u8,
 
     /// Not used by SOEM
-    pub slave_register: u8,
+    slave_register: u8,
 
-    pub activate: u8,
+    activate: u8,
 
     /// Not used by SOEM
-    pub process_data_interface_control: u8,
+    process_data_interface_control: u8,
+}
+
+impl EepromSyncManager {
+    pub const fn sync_manager_count(&self) -> u8 {
+        self.sync_manager_count
+    }
+
+    pub const fn phase_start(&self) -> u16 {
+        self.phase_start
+    }
+
+    pub const fn phase_length(&self) -> u16 {
+        self.phase_length
+    }
+
+    pub const fn control_register(&self) -> u8 {
+        self.control_register
+    }
+
+    pub const fn activate(&self) -> u8 {
+        self.activate
+    }
 }
 
 impl EepromSyncManager {
@@ -652,7 +1260,7 @@ impl EepromSyncManager {
     /// # Returns
     /// First SyncManager struct from SII
     pub fn sii_sm(context: &mut Context, slave: u16) -> Result<Self, MainError> {
-        let eeprom_control = context.slavelist[usize::from(slave)].eep_pdi;
+        let eeprom_control = context.slavelist[usize::from(slave)].eeprom().control();
 
         let start_position = context.sii_find(slave, SiiCategory::SM)?;
         let sync_manager = if start_position > 0 {
@@ -704,7 +1312,7 @@ impl EepromSyncManager {
         slave: u16,
         index: u8,
     ) -> Result<EepromSyncManager, MainError> {
-        let eeprom_control = context.slavelist[usize::from(slave)].eep_pdi;
+        let eeprom_control = context.slavelist[usize::from(slave)].eeprom().control();
         if index >= self.sync_manager_count {
             return Err(MainError::SyncManagerIndexOutOfBounds);
         }
@@ -733,13 +1341,13 @@ impl EepromSyncManager {
 /// Eeprom Process Data Object
 #[derive(Debug)]
 pub struct EepromPdo {
-    pub start_position: u16,
-    pub length: u16,
-    pub pdo_count: u16,
-    pub index: [u16; MAX_EE_PDO],
-    pub sync_manager: [u16; MAX_EE_PDO],
-    pub bit_size: [u16; MAX_EE_PDO],
-    pub sync_manager_bit_size: [u16; MAX_SM as usize],
+    start_position: u16,
+    length: u16,
+    pdo_count: u16,
+    index: [u16; MAX_EE_PDO],
+    sync_manager: [u16; MAX_EE_PDO],
+    bit_size: [u16; MAX_EE_PDO],
+    sync_manager_bit_size: [u16; MAX_SM as usize],
 }
 
 impl Default for EepromPdo {
@@ -757,6 +1365,10 @@ impl Default for EepromPdo {
 }
 
 impl EepromPdo {
+    pub fn get_sync_manager_bit_size(&self, sync_manager_index: u8) -> u16 {
+        self.sync_manager_bit_size[usize::from(sync_manager_index)]
+    }
+
     /// Get PDO data from SII section in slave EEPROM.
     ///
     /// # Parameters
@@ -777,7 +1389,7 @@ impl EepromPdo {
         slave: u16,
         transmitting: bool,
     ) -> Result<(u32, EepromPdo), MainError> {
-        let eeprom_control = context.slavelist[usize::from(slave)].eep_pdi;
+        let eeprom_control = context.slavelist[usize::from(slave)].eeprom().control();
         let mut size = 0;
         let mut pdo_count = 0;
         let mut length = 0;
@@ -951,7 +1563,7 @@ impl MailboxIn {
         timeout: Duration,
     ) -> Result<u16, MainError> {
         let slave_usize = usize::from(slave);
-        let mailbox_length = context.slavelist[slave_usize].mailbox_read_length;
+        let mailbox_length = context.slavelist[slave_usize].mailbox().read_length();
 
         if !(0..=MAX_MAILBOX_SIZE).contains(&usize::from(mailbox_length)) {
             return Err(MainError::NoMailboxFound);
@@ -982,7 +1594,7 @@ impl MailboxIn {
 
         // If read mailbox is available
         if work_counter > 0 && sync_manager_status & 8 > 0 {
-            let mailbox_read_offset = context.slavelist[slave_usize].mailbox_read_offset;
+            let mailbox_read_offset = context.slavelist[slave_usize].mailbox().read_offset();
             let mailbox_header = MailboxHeader::read_from(&mut self.data.as_slice())?;
 
             loop {
@@ -1025,7 +1637,7 @@ impl MailboxIn {
                 {
                     // Ethernet over EtherCAT response
                     let eoe_mailbox = EthernetOverEthercat::read_from(&mut self.data.as_slice())?;
-                    let frame_info1 = ethercat_to_host(eoe_mailbox.frame_info1);
+                    let frame_info1 = ethercat_to_host(eoe_mailbox.frame_info1());
 
                     // All non fragment data frame types are expected to be handled by slave
                     // send/receive API if the Ethernet over EtherCAT hook is set.
@@ -1168,7 +1780,7 @@ impl MailboxOut {
         timeout: Duration,
     ) -> Result<u16, MainError> {
         let slave_usize = usize::from(slave);
-        let mailbox_length = context.slavelist[slave_usize].mailbox_length;
+        let mailbox_length = context.slavelist[slave_usize].mailbox().length();
         if mailbox_length == 0 || usize::from(mailbox_length) > MAX_MAILBOX_SIZE {
             return Err(MainError::NoMailboxFound);
         }
@@ -1177,7 +1789,7 @@ impl MailboxOut {
             return Err(MainError::MailboxFull);
         }
 
-        let mailbox_write_offset = context.slavelist[slave_usize].mailbox_write_offset;
+        let mailbox_write_offset = context.slavelist[slave_usize].mailbox().write_offset();
 
         // Write to slave in mailbox.
         fpwr(
@@ -1215,15 +1827,52 @@ impl Default for MailboxOut {
 /// Standard ethercat mailbox header
 #[derive(Debug, Default)]
 pub struct MailboxHeader {
-    pub length: Ethercat<u16>,
-    pub address: Ethercat<u16>,
-    pub priority: u8,
-    pub mailbox_type: u8,
+    length: Ethercat<u16>,
+    address: Ethercat<u16>,
+    priority: u8,
+    mailbox_type: u8,
 }
 
 impl MailboxHeader {
+    pub const fn new(
+        length: Ethercat<u16>,
+        address: Ethercat<u16>,
+        priority: u8,
+        mailbox_type: u8,
+    ) -> Self {
+        Self {
+            length,
+            address,
+            priority,
+            mailbox_type,
+        }
+    }
     pub const fn size() -> usize {
         2 * size_of::<u16>() + 2 * size_of::<u8>()
+    }
+
+    pub fn length_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.length
+    }
+
+    pub const fn length(&self) -> Ethercat<u16> {
+        self.length
+    }
+
+    pub fn address_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.address
+    }
+
+    pub fn priority_mut(&mut self) -> &mut u8 {
+        &mut self.priority
+    }
+
+    pub fn mailbox_type_mut(&mut self) -> &mut u8 {
+        &mut self.mailbox_type
+    }
+
+    pub const fn mailbox_type(&self) -> u8 {
+        self.mailbox_type
     }
 
     /// # Errors
@@ -1256,9 +1905,9 @@ impl MailboxHeader {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ApplicationLayerStatus {
-    pub status: Ethercat<u16>,
-    pub unused: Ethercat<u16>,
-    pub code: Ethercat<u16>,
+    status: Ethercat<u16>,
+    unused: Ethercat<u16>,
+    code: Ethercat<u16>,
 }
 
 unsafe impl NoUninit for ApplicationLayerStatus {}
@@ -1295,11 +1944,11 @@ impl ApplicationLayerStatus {
 
 /// Stack structure to store segmented logical read, logical write, logical read/write constructs
 pub struct IndexStack {
-    pub pushed: u8,
-    pub pulled: u8,
-    pub index: [u8; MAX_BUF_COUNT],
-    pub data: [Vec<u8>; MAX_BUF_COUNT],
-    pub dc_offset: [u16; MAX_BUF_COUNT],
+    pushed: u8,
+    pulled: u8,
+    index: [u8; MAX_BUF_COUNT],
+    data: [Vec<u8>; MAX_BUF_COUNT],
+    dc_offset: [u16; MAX_BUF_COUNT],
 }
 
 impl IndexStack {
@@ -1346,17 +1995,31 @@ impl IndexStack {
 
 /// Ringbuffer for error storage
 pub struct ErrorRing {
-    pub head: u16,
-    pub tail: u16,
-    pub error: [ErrorInfo; MAX_ERROR_LIST_ENTRIES + 1],
+    head: u16,
+    tail: u16,
+    error: [ErrorInfo; MAX_ERROR_LIST_ENTRIES + 1],
 }
 
 /// Sync manager communication type structure for communication access
 #[derive(Debug, Clone)]
 pub struct SyncManagerCommunicationType {
-    pub number: u8,
-    pub null: u8,
-    pub sync_manager_type: [SyncManagerType; MAX_SM as usize],
+    number: u8,
+    null: u8,
+    sync_manager_type: [SyncManagerType; MAX_SM as usize],
+}
+
+impl SyncManagerCommunicationType {
+    pub fn number_mut(&mut self) -> &mut u8 {
+        &mut self.number
+    }
+
+    pub const fn number(&self) -> u8 {
+        self.number
+    }
+
+    pub fn get_sync_manager_type(&self, sync_manager_index: u8) -> SyncManagerType {
+        self.sync_manager_type[usize::from(sync_manager_index)]
+    }
 }
 
 impl From<SyncManagerCommunicationType> for [u8; 2 + MAX_SM as usize] {
@@ -1388,9 +2051,23 @@ impl TryFrom<[u8; 2 + MAX_SM as usize]> for SyncManagerCommunicationType {
 /// Service data object assign structure for communication access
 #[derive(Debug, Clone, Copy)]
 pub struct PdoAssign {
-    pub number: u8,
-    pub null: u8,
-    pub index: [u16; 256],
+    number: u8,
+    null: u8,
+    index: [u16; 256],
+}
+
+impl PdoAssign {
+    pub fn number_mut(&mut self) -> &mut u8 {
+        &mut self.number
+    }
+
+    pub const fn number(&self) -> u8 {
+        self.number
+    }
+
+    pub const fn index(&self) -> &[u16; 256] {
+        &self.index
+    }
 }
 
 #[expect(unsafe_code)]
@@ -1417,9 +2094,19 @@ impl<'pdo> From<&'pdo PdoAssign> for &'pdo [u8] {
 /// Service data object assign structure for communication access
 #[derive(Debug, Clone, Copy)]
 pub struct PdoDescription {
-    pub number: u8,
-    pub null: u8,
-    pub pdo: [u32; 256],
+    number: u8,
+    null: u8,
+    pdo: [u32; 256],
+}
+
+impl PdoDescription {
+    pub fn number_mut(&mut self) -> &mut u8 {
+        &mut self.number
+    }
+
+    pub const fn pdo(&self) -> &[u32; 256] {
+        &self.pdo
+    }
 }
 
 #[expect(unsafe_code)]
@@ -1447,26 +2134,51 @@ impl<'pdo> From<&'pdo PdoDescription> for &'pdo [u8] {
 pub enum PacketError {
     UnexpectedFrameReturned = 1,
     DataContainerTooSmallForType = 3,
+    NoResponse = 4,
     TooManySyncManagers = 10,
+}
+
+/// Struct to retrieve errors
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorInfo {
+    /// TIme at which the error was generated
+    time: SystemTime,
+
+    /// Signal bit, error set but not read
+    signal: bool,
+
+    /// Slave number that generated the error
+    slave: u16,
+
+    /// GoE Service Data Object index that generated the error
+    index: u16,
+
+    /// GoE Service Data Object subindex that generated the error
+    sub_index: u8,
+
+    /// Type of error
+    error_type: ErrorType,
+
+    abort_error: AbortError,
 }
 
 /// Context structure referenced by all Ethernet eXtended functions
 pub struct Context<'context> {
     /// Port reference may include red port
-    pub port: Port<'context>,
+    port: Port<'context>,
 
-    pub slavelist: Vec<Slave<'context>>,
+    slavelist: Vec<Slave<'context>>,
 
     /// Number of slaves found in configuration
-    pub slave_count: u16,
+    slave_count: u16,
 
     /// Maximum nummber of slaves allowed in slavelist
-    pub max_slaves: u16,
+    max_slaves: u16,
 
-    pub grouplist: Vec<SlaveGroup<'context>>,
+    grouplist: Vec<SlaveGroup<'context>>,
 
     /// Maximum number of groups allowed in grouplist
-    pub max_group: u32,
+    max_group: u32,
 
     /// Internal reference to eeprom cache buffer
     esibuf: &'context mut [u8],
@@ -1484,43 +2196,228 @@ pub struct Context<'context> {
     index_stack: IndexStack,
 
     /// Reference to ecaterror state
-    pub ecaterror: Arc<AtomicBool>,
+    ecaterror: bool,
 
     /// Reference to last DC time from slaves
-    pub dc_time: i64,
+    dc_time: i64,
 
     /// Internal Sync manager buffer
-    pub sync_manager_communication_type: Vec<SyncManagerCommunicationType>,
+    sync_manager_communication_type: Vec<SyncManagerCommunicationType>,
 
     /// Internal pdo assign list
-    pub pdo_assign: Vec<PdoAssign>,
+    pdo_assign: Vec<PdoAssign>,
 
     /// Internal pdo description list
-    pub pdo_description: Vec<PdoDescription>,
+    pdo_description: Vec<PdoDescription>,
 
     /// Internal eeprom sync manager list
-    pub eep_sync_manager: EepromSyncManager,
+    eep_sync_manager: EepromSyncManager,
 
     // Internal eeprom FMMU list
-    pub eep_fmmu: EepromFmmu,
+    eep_fmmu: EepromFmmu,
 
     /// Registered file over ethercat hook
-    pub file_over_ethercat_hook: Option<fn(slave: u16, packetnumber: i32, datasize: i32) -> i32>,
+    file_over_ethercat_hook: Option<fn(slave: u16, packetnumber: i32, datasize: i32) -> i32>,
 
     /// Registered Ethernet over ethercat hook
     #[expect(clippy::type_complexity)]
-    pub ethernet_over_ethercat_hook:
+    ethernet_over_ethercat_hook:
         Option<fn(context: &mut Context, slave: u16, ecembx: &mut [u8]) -> i32>,
 
     /// Flag to control legacy automatic state change or manual state change
-    pub manual_state_change: bool,
+    manual_state_change: bool,
 
     /// Userdata promotes application configuration especially in EC_VER2 with multiple ec_context
     /// instances.
-    pub userdata: Vec<u8>,
+    userdata: Vec<u8>,
 }
 
 impl<'context> Context<'context> {
+    /// Ethernet over Ethercat progress hook
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `hook`: Pointer to hook function
+    pub fn set_ethernet_over_ethercat_hook(
+        &mut self,
+        hook: fn(context: &mut Context, slave: u16, ece_mailbox: &mut [u8]) -> i32,
+    ) {
+        self.ethernet_over_ethercat_hook = Some(hook);
+    }
+
+    /// File over Ethercat progress hook
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `hook`: Pointer to hook function
+    pub fn set_file_over_ethercat_hook(
+        &mut self,
+        hook: fn(slave: u16, packetnumber: i32, datasize: i32) -> i32,
+    ) {
+        self.file_over_ethercat_hook = Some(hook);
+    }
+
+    pub const fn file_over_ethercat_hook(
+        &self,
+    ) -> Option<fn(slave: u16, packetnumber: i32, datasize: i32) -> i32> {
+        self.file_over_ethercat_hook
+    }
+
+    pub const fn manual_state_change(&self) -> bool {
+        self.manual_state_change
+    }
+
+    pub fn get_slave_mut(&mut self, slave: u16) -> &mut Slave<'context> {
+        &mut self.slavelist[usize::from(slave)]
+    }
+
+    pub fn get_slave(&self, slave: u16) -> &Slave<'context> {
+        &self.slavelist[usize::from(slave)]
+    }
+
+    pub fn get_pdo_assign(&self, thread_number: usize) -> PdoAssign {
+        self.pdo_assign[thread_number]
+    }
+
+    pub fn get_pdo_assign_mut(&mut self, thread_number: usize) -> &mut PdoAssign {
+        &mut self.pdo_assign[thread_number]
+    }
+
+    pub fn get_pdo_description(&self, thread_number: usize) -> PdoDescription {
+        self.pdo_description[thread_number]
+    }
+
+    pub fn get_pdo_description_mut(&mut self, thread_number: usize) -> &mut PdoDescription {
+        &mut self.pdo_description[thread_number]
+    }
+
+    pub fn get_sync_manager_communication_type_mut(
+        &mut self,
+        thread_number: usize,
+    ) -> &mut SyncManagerCommunicationType {
+        &mut self.sync_manager_communication_type[thread_number]
+    }
+
+    pub fn port_mut(&mut self) -> &mut Port<'context> {
+        &mut self.port
+    }
+
+    pub fn slave_count_mut(&mut self) -> &mut u16 {
+        &mut self.slave_count
+    }
+
+    pub const fn slave_count(&self) -> u16 {
+        self.slave_count
+    }
+
+    pub const fn max_slaves(&self) -> u16 {
+        self.max_slaves
+    }
+
+    pub fn reset_slave_list(&mut self) {
+        self.slavelist.clear();
+        if self.slavelist.capacity() < usize::from(self.max_slaves) {
+            self.slavelist
+                .reserve_exact(usize::from(self.max_slaves) - self.slavelist.capacity());
+        }
+    }
+
+    pub fn slavelist(&self) -> &[Slave<'context>] {
+        &self.slavelist
+    }
+
+    pub fn slavelist_mut(&mut self) -> &mut [Slave<'context>] {
+        &mut self.slavelist
+    }
+
+    pub fn reset_group_list(&mut self) {
+        self.grouplist.clear();
+        if self.grouplist.capacity() < self.max_group as usize {
+            self.grouplist
+                .reserve_exact(self.max_group as usize - self.grouplist.capacity());
+        }
+    }
+
+    pub fn push_group(&mut self, slave_group: SlaveGroup<'context>) {
+        self.grouplist.push(slave_group);
+    }
+
+    pub fn get_group(&self, group: u8) -> &SlaveGroup {
+        &self.grouplist[usize::from(group)]
+    }
+
+    pub fn get_group_mut(&mut self, group: u8) -> &mut SlaveGroup<'context> {
+        &mut self.grouplist[usize::from(group)]
+    }
+
+    pub const fn max_group(&self) -> u32 {
+        self.max_group
+    }
+
+    pub fn eep_sync_manager_mut(&mut self) -> &mut EepromSyncManager {
+        &mut self.eep_sync_manager
+    }
+
+    pub const fn eep_sync_manager(&self) -> &EepromSyncManager {
+        &self.eep_sync_manager
+    }
+
+    pub fn eep_fmmu_mut(&mut self) -> &mut EepromFmmu {
+        &mut self.eep_fmmu
+    }
+
+    pub const fn eep_fmmu(&self) -> EepromFmmu {
+        self.eep_fmmu
+    }
+
+    /// Report Service Data Object error
+    ///
+    /// # Parameters
+    /// - `context`: Context struct
+    /// - `slave`: slave number
+    /// - `index`: index that generated the error
+    /// - `sub_index`: Subindex that generated the error
+    /// - `abort_error`: Abort code or error, see EtherCAT documentation for list
+    pub fn sdo_error(&mut self, slave: u16, index: u16, sub_index: u8, abort_error: AbortError) {
+        self.ecaterror = true;
+        self.push_error(ErrorInfo {
+            time: SystemTime::now(),
+            slave,
+            index,
+            sub_index,
+            error_type: ErrorType::ServiceDataObjectError,
+            abort_error,
+            signal: false,
+        });
+    }
+
+    /// Report Service Data Object info error
+    ///
+    /// # Parameters
+    /// - `context`: Context struct
+    /// - `slave`: Slave number
+    /// - `index`: Index that generated the error
+    /// - `sub_index`: Subindex that generated the error
+    /// - `abort_error`: Abort code or error, see EtherCAT documentation for list
+    pub(super) fn sdo_info_error(
+        &mut self,
+        slave: u16,
+        index: u16,
+        sub_index: u8,
+        abort_error: AbortError,
+    ) {
+        self.ecaterror = true;
+        self.push_error(ErrorInfo {
+            time: SystemTime::now(),
+            signal: false,
+            slave,
+            index,
+            sub_index,
+            error_type: ErrorType::SdoInfoError,
+            abort_error,
+        });
+    }
+
     /// Initialize library in single NIC mode
     ///
     /// # Parameters
@@ -1563,30 +2460,25 @@ impl<'context> Context<'context> {
         interface_name2: &str,
     ) -> Result<(), NicdrvError> {
         let port = &mut self.port;
-        port.redport = Some(redport);
+        port.set_red_port(redport);
         port.setup_nic(interface_name, false)?;
         let rval = port.setup_nic(interface_name2, true);
 
         // Prepare "dummy" broadcat read tx frame for redundant operation
-        let mut ethernet_header =
-            EthernetHeader::try_from(port.temp_tx_buffer.lock().unwrap().as_slice())?;
-        ethernet_header.source_address[1] = host_to_network(SECONDARY_MAC[0]);
-        port.temp_tx_buffer
-            .lock()
-            .unwrap()
+        let mut ethernet_header = EthernetHeader::try_from(port.temp_tx_buffer().as_slice())?;
+        ethernet_header.source_address_mut()[1] = host_to_network(SECONDARY_MAC[0]);
+        port.temp_tx_buffer()
             .copy_from_slice(ethernet_header.as_ref());
         let zbuf = [0; 2];
         setup_datagram(
-            &mut port.temp_tx_buffer.lock().unwrap(),
+            &mut port.temp_tx_buffer(),
             CommandType::BroadcastRead,
             0,
             0,
             2,
             &zbuf,
         );
-        port.temp_tx_buffer
-            .lock()
-            .unwrap()
+        port.temp_tx_buffer()
             .resize(
                 ETHERCAT_HEADER_SIZE + ETHERNET_HEADER_SIZE + ETHERCAT_WORK_COUNTER_SIZE + 2,
                 0,
@@ -1613,7 +2505,7 @@ impl<'context> Context<'context> {
         if usize::from(self.elist.tail) >= MAX_ERROR_LIST_ENTRIES {
             self.elist.tail = 0;
         }
-        self.ecaterror.store(true, Ordering::Relaxed);
+        self.ecaterror = true;
     }
 
     /// Pops an error from the list
@@ -1626,7 +2518,7 @@ impl<'context> Context<'context> {
     pub fn pop_error(&mut self) -> Option<ErrorInfo> {
         self.elist.error[usize::from(self.elist.tail)].signal = false;
         if self.elist.head == self.elist.tail {
-            self.ecaterror.store(false, Ordering::Relaxed);
+            self.ecaterror = false;
             None
         } else {
             self.elist.tail += 1;
@@ -1668,7 +2560,7 @@ impl<'context> Context<'context> {
     /// - `sub_index`: Subindex that generated the error
     /// - `error_code`: Error code
     pub fn packet_error(&mut self, slave: u16, index: u16, sub_index: u8, error_code: PacketError) {
-        self.ecaterror.store(true, Ordering::Relaxed);
+        self.ecaterror = true;
         self.push_error(ErrorInfo {
             time: SystemTime::now(),
             slave,
@@ -1678,6 +2570,26 @@ impl<'context> Context<'context> {
             abort_error: AbortError::PacketError(error_code),
             signal: false,
         });
+    }
+
+    /// Report Servo over EtherCAT error.
+    ///
+    /// # Parameters
+    /// - `self`: Context struct
+    /// - `slave`: Slave number
+    /// - `idn`: IDN that generated the error
+    /// - `error`: Error code, see EtherCAT documentation for list
+    pub(super) fn servo_over_ethercat_error(&mut self, slave: u16, idn: u16, error: u16) {
+        self.push_error(ErrorInfo {
+            time: SystemTime::now(),
+            signal: false,
+            slave,
+            index: idn,
+            sub_index: 0,
+            error_type: ErrorType::ServerOverEthercatError,
+            abort_error: AbortError::ErrorCode(error),
+        });
+        self.ecaterror = true;
     }
 
     /// Report mailbox error
@@ -1774,7 +2686,8 @@ impl<'context> Context<'context> {
         let eeprom_address = address >> 1;
         let eeprom_data64 = self.read_eeprom_fp(config_address, eeprom_address, TIMEOUT_EEP)?;
 
-        let count = if self.slavelist[usize::from(slave)].eep_read_size == EepReadSize::Bytes8 {
+        let count = if self.slavelist[usize::from(slave)].eeprom().read_size == EepReadSize::Bytes8
+        {
             // 8 byte response
             self.esibuf[usize::from(eeprom_address) << 1..]
                 .copy_from_slice(&eeprom_data64.to_bytes());
@@ -1818,7 +2731,7 @@ impl<'context> Context<'context> {
     /// byte address of section at section length entry, None if not available
     pub fn sii_find(&mut self, slave: u16, category: SiiCategory) -> Result<u16, MainError> {
         let slave_usize = usize::from(slave);
-        let eeprom_control = self.slavelist[slave_usize].eep_pdi;
+        let eeprom_control = self.slavelist[slave_usize].eeprom().control();
 
         let mut address = SII_START << 1;
 
@@ -1883,7 +2796,7 @@ impl<'context> Context<'context> {
         string_number: u16,
     ) -> Result<heapless::String<SIZE>, MainError> {
         let slave_usize = usize::from(slave);
-        let eeprom_control = self.slavelist[slave_usize].eep_pdi;
+        let eeprom_control = self.slavelist[slave_usize].eeprom().control();
 
         let mut result = heapless::Vec::<u8, SIZE>::new();
         if let Ok(address) = self.sii_find(slave, SiiCategory::String) {
@@ -2204,12 +3117,12 @@ impl<'context> Context<'context> {
     /// Amount of words (u16) read from eeprom
     pub fn esi_dump(&mut self, slave: u16, esibuf: &mut [u8]) -> Result<usize, MainError> {
         let slave_usize = usize::from(slave);
-        let eeprom_control = self.slavelist[slave_usize].eep_pdi;
+        let eeprom_control = self.slavelist[slave_usize].eeprom().control();
 
         // Set eeprom control to master
         self.eeprom_to_master(slave)?;
         let config_address = self.slavelist[slave_usize].config_address;
-        let increment = if self.slavelist[slave_usize].eep_read_size == EepReadSize::Bytes8 {
+        let increment = if self.slavelist[slave_usize].eeprom().read_size == EepReadSize::Bytes8 {
             4
         } else {
             8
@@ -2305,7 +3218,7 @@ impl<'context> Context<'context> {
     /// Ok(()) or error
     pub fn eeprom_to_master(&mut self, slave: u16) -> Result<(), NicdrvError> {
         let slave_usize = usize::from(slave);
-        if self.slavelist[slave_usize].eep_pdi == EepromControl::Master {
+        if self.slavelist[slave_usize].eeprom().control() == EepromControl::Master {
             return Ok(());
         }
 
@@ -2352,7 +3265,7 @@ impl<'context> Context<'context> {
                 return Err(error);
             }
         }
-        self.slavelist[slave_usize].eep_pdi = EepromControl::Master;
+        *self.slavelist[slave_usize].eeprom_mut().control_mut() = EepromControl::Master;
 
         Ok(())
     }
@@ -2370,7 +3283,7 @@ impl<'context> Context<'context> {
     /// # Returns
     /// `Ok(())` or error
     pub fn eeprom_to_pdi(&mut self, slave: u16) -> Result<(), NicdrvError> {
-        if self.slavelist[usize::from(slave)].eep_pdi == EepromControl::Pdi {
+        if self.slavelist[usize::from(slave)].eeprom().control() == EepromControl::Pdi {
             return Ok(());
         }
 
@@ -2393,7 +3306,9 @@ impl<'context> Context<'context> {
                 return Err(error);
             }
         }
-        self.slavelist[usize::from(slave)].eep_pdi = EepromControl::Pdi;
+        *self.slavelist[usize::from(slave)]
+            .eeprom_mut()
+            .control_mut() = EepromControl::Pdi;
         Ok(())
     }
 
@@ -2921,276 +3836,6 @@ impl<'context> Context<'context> {
             }
         }
     }
-
-    /// Transmit processdata to slaves.
-    /// Uses Logical read/write, or logical read followed by logical write if logical read/write is not allowed (blockLRW).
-    /// Both the input and output processdata are transmitted.
-    /// The outputs with the actual data, the inputs have a plcaeholder.
-    /// The inputs are gathered with the receive processdata function.
-    /// In contrast to the base lrw function, this function is non-blocking.
-    /// If the processdata doesn't fit in one datagram, multiple are used.
-    /// In order to recombine thee slave response, a stack is used.
-    ///
-    /// # Parameters
-    /// `self`: Context struct
-    /// `group`: Group number
-    /// `use_overlap_io`: Flag if overlapped iomap is used
-    ///
-    /// # Returns
-    /// Ok if processdata is transmitted without error, error otherwise
-    fn main_send_processdata(&mut self, group: u8, use_overlap_io: bool) -> Result<(), MainError> {
-        let group_usize = usize::from(group);
-        let mut first = self.grouplist[group_usize].has_dc;
-
-        // For overlapping IO map, use the biggest
-        let (mut length, mut io_map_input_offset) = if use_overlap_io {
-            // For overlap IOmap make the frame EQ big to the biggest part
-            (
-                self.grouplist[group_usize]
-                    .output_bytes
-                    .max(self.grouplist[group_usize].input_bytes),
-                // Save the offset used to compensate where to save inputs when frame returns
-                self.grouplist[group_usize].output_bytes,
-            )
-        } else {
-            (
-                self.grouplist[group_usize].output_bytes + self.grouplist[group_usize].input_bytes,
-                0,
-            )
-        };
-
-        if length == 0 {
-            return Err(MainError::NoIOFound);
-        }
-
-        let mut logical_address = self.grouplist[group_usize].logical_start_address;
-        // Check if logical read/write is blocked by one or more slaves.
-        if self.grouplist[group_usize].block_logical_read_write > 0 {
-            // If inputs available, generate logical read
-            if self.grouplist[group_usize].input_bytes > 0 {
-                let mut current_segment = self.grouplist[group_usize].first_input_segment;
-                let mut data = self.grouplist[group_usize].inputs;
-                let mut length = self.grouplist[group_usize].input_bytes;
-                logical_address += self.grouplist[group_usize].output_bytes;
-
-                // Segment transfer if needed
-                loop {
-                    let sublength =
-                        if current_segment == self.grouplist[group_usize].first_input_segment {
-                            self.grouplist[group_usize].io_segments[usize::from(current_segment)]
-                                - u32::from(self.grouplist[group_usize].input_offset)
-                        } else {
-                            self.grouplist[group_usize].io_segments[usize::from(current_segment)]
-                        };
-                    current_segment += 1;
-
-                    // Get new index
-                    let index = self.port.get_index();
-                    let word1 = low_word(logical_address);
-                    let word2 = high_word(logical_address);
-                    setup_datagram(
-                        &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
-                        CommandType::LogicalRead,
-                        index,
-                        word1,
-                        word2,
-                        &data[..sublength as usize],
-                    );
-                    let dc_offset = if first {
-                        first = false;
-                        // Fixed Pointer Read Multiple Write in second datagram
-                        add_datagram(
-                            &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
-                            CommandType::LogicalRead,
-                            index,
-                            false,
-                            self.slavelist[usize::from(self.grouplist[group_usize].dc_next)]
-                                .config_address,
-                            EthercatRegister::DistributedClockSystemTime.into(),
-                            &host_to_ethercat(self.dc_time).to_bytes(),
-                        ) as u16
-                    } else {
-                        0
-                    };
-
-                    // Send frame
-                    self.port.out_frame_red(index)?;
-
-                    // Push index and data pointer on stack
-                    self.index_stack.push_index(index, data, dc_offset);
-                    length -= sublength;
-                    logical_address += sublength;
-                    data = &data[sublength as usize..];
-
-                    if length == 0
-                        || current_segment >= self.grouplist[group_usize].used_segment_count
-                    {
-                        break;
-                    }
-                }
-            }
-
-            // If outputs available generate logical write
-            if self.grouplist[group_usize].output_bytes != 0 {
-                let mut data = self.grouplist[group_usize].outputs;
-                let mut length = self.grouplist[group_usize].output_bytes;
-                let mut logical_address = self.grouplist[group_usize].logical_start_address;
-                let mut current_segment = 0;
-
-                // Segment transfer if needed
-                loop {
-                    let sub_length =
-                        self.grouplist[group_usize].io_segments[current_segment].min(length);
-                    current_segment += 1;
-
-                    // Get new index
-                    let index = self.port.get_index();
-                    let word1 = low_word(logical_address);
-                    let word2 = high_word(logical_address);
-
-                    setup_datagram(
-                        &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
-                        CommandType::FixedReadMultipleWrite,
-                        index,
-                        word1,
-                        word2,
-                        &data[..sub_length as usize],
-                    );
-                    let dc_offset = if first {
-                        first = false;
-
-                        // Fixed Pointer Read Multiple Write in second datagram
-                        add_datagram(
-                            &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
-                            CommandType::FixedReadMultipleWrite,
-                            index,
-                            false,
-                            self.slavelist[usize::from(self.grouplist[usize::from(group)].dc_next)]
-                                .config_address,
-                            EthercatRegister::DistributedClockSystemTime.into(),
-                            &host_to_ethercat(self.dc_time).to_bytes(),
-                        ) as u16
-                    } else {
-                        0
-                    };
-
-                    // Send frame
-                    self.port.out_frame_red(index)?;
-
-                    // Push index and data pointer on stack
-                    self.index_stack.push_index(index, data, dc_offset);
-
-                    length -= sub_length;
-                    logical_address += sub_length;
-                    data = &data[sub_length as usize..];
-
-                    if length == 0
-                        || current_segment
-                            >= usize::from(self.grouplist[group_usize].used_segment_count)
-                    {
-                        break;
-                    }
-                }
-            }
-        } else {
-            // Logical read/write can be used
-            let mut data = if self.grouplist[group_usize].output_bytes == 0 {
-                // Clear offset, don't compensate for overlapping IOmap if there only are inputs
-                io_map_input_offset = 0;
-
-                self.grouplist[group_usize].inputs
-            } else {
-                self.grouplist[group_usize].outputs
-            };
-
-            // Segment transfer if needed
-            let mut current_segment = 0;
-            loop {
-                let sub_length = self.grouplist[group_usize].io_segments[current_segment];
-                current_segment += 1;
-
-                // Get new index
-                let index = self.port.get_index();
-                let word1 = low_word(logical_address);
-                let word2 = high_word(logical_address);
-
-                setup_datagram(
-                    &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
-                    CommandType::LogicalReadWrite,
-                    index,
-                    word1,
-                    word2,
-                    &data[..sub_length as usize],
-                );
-
-                let dc_offset = if first {
-                    first = false;
-
-                    //Fixed Pointer Read Multiple Write in second datagram
-                    add_datagram(
-                        &mut self.port.tx_buffers.lock().unwrap()[usize::from(index)],
-                        CommandType::FixedReadMultipleWrite,
-                        index,
-                        false,
-                        self.slavelist[usize::from(self.grouplist[group_usize].dc_next)]
-                            .config_address,
-                        EthercatRegister::DistributedClockSystemTime.into(),
-                        &host_to_ethercat(self.dc_time).to_bytes(),
-                    ) as u16
-                } else {
-                    0
-                };
-
-                // Send frame
-                self.port.out_frame_red(index)?;
-
-                // Push index and pointer on stack.
-                // The `iomap_input_offset` compensate for where the inputs are stored
-                // in the IOmap if we use an overlapping IOmap. If a regular IOmap is
-                // used, it should always be 0.
-                self.index_stack.push_index(
-                    index,
-                    &data[io_map_input_offset as usize..],
-                    dc_offset,
-                );
-                length -= sub_length;
-                logical_address += sub_length;
-                data = &data[sub_length as usize..];
-
-                if length == 0
-                    || current_segment
-                        >= usize::from(self.grouplist[group_usize].used_segment_count)
-                {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn send_overlap_processdata_group(context: &mut Context, group: u8) -> i32 {
-        todo!()
-    }
-
-    pub fn send_processdata_group(context: &mut Context, group: u8) -> i32 {
-        todo!()
-    }
-
-    pub fn receive_processdata_group(context: &mut Context, group: u8, timeout: Duration) -> i32 {
-        todo!()
-    }
-
-    pub fn send_processdata(context: &mut Context) -> i32 {
-        todo!()
-    }
-
-    pub fn send_overlap_processdata(context: &mut Context) -> i32 {
-        todo!()
-    }
-
-    pub fn receive_processdata(context: &mut Context, timeout: Duration) -> i32 {
-        todo!()
-    }
 }
 
 /// An eeprom request struct, containing information required to perform EEPROM requests in
@@ -3357,6 +4002,463 @@ impl EmergencyRequest {
     }
 }
 
+pub struct ProcessDataRequest {
+    group: u8,
+}
+
+impl ProcessDataRequest {
+    /// Transmit processdata to slaves.
+    /// Uses Logical read/write, or logical read followed by logical write if logical read/write is not allowed (blockLRW).
+    /// Both the input and output processdata are transmitted.
+    /// The outputs with the actual data, the inputs have a plcaeholder.
+    /// The inputs are gathered with the receive processdata function.
+    /// In contrast to the base lrw function, this function is non-blocking.
+    /// If the processdata doesn't fit in one datagram, multiple are used.
+    /// In order to recombine thee slave response, a stack is used.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `group`: Group number
+    /// `use_overlap_io`: Flag if overlapped iomap is used
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - No inputs and no outputs were found in slave group
+    /// - Failed to transmit the read IO request
+    ///
+    /// # Returns
+    /// Ok if processdata is transmitted without error, error otherwise
+    fn main_send_processdata(
+        context: &mut Context,
+        group: u8,
+        use_overlap_io: bool,
+    ) -> Result<Self, MainError> {
+        let group_usize = usize::from(group);
+        let mut first = context.grouplist[group_usize].has_distributed_clock();
+
+        // For overlapping IO map, use the biggest
+        let (mut length, mut io_map_input_offset) = if use_overlap_io {
+            // For overlap IOmap make the frame EQ big to the biggest part
+            (
+                context.grouplist[group_usize]
+                    .output_bytes
+                    .max(context.grouplist[group_usize].input_bytes),
+                // Save the offset used to compensate where to save inputs when frame returns
+                context.grouplist[group_usize].output_bytes,
+            )
+        } else {
+            (
+                context.grouplist[group_usize].output_bytes
+                    + context.grouplist[group_usize].input_bytes,
+                0,
+            )
+        };
+
+        if length == 0 {
+            return Err(MainError::NoIOFound);
+        }
+
+        let mut logical_address = context.grouplist[group_usize].logical_start_address;
+        // Check if logical read/write is blocked by one or more slaves.
+        if context.grouplist[group_usize].block_logical_read_write > 0 {
+            // If inputs available, generate logical read
+            if context.grouplist[group_usize].input_bytes > 0 {
+                let mut current_segment = context.grouplist[group_usize].first_input_segment;
+                let mut data = context.grouplist[group_usize].inputs();
+                let mut length = context.grouplist[group_usize].input_bytes;
+                logical_address += context.grouplist[group_usize].output_bytes;
+
+                // Segment transfer if needed
+                loop {
+                    let sublength =
+                        if current_segment == context.grouplist[group_usize].first_input_segment {
+                            context.grouplist[group_usize].io_segments[usize::from(current_segment)]
+                                - u32::from(context.grouplist[group_usize].input_offset)
+                        } else {
+                            context.grouplist[group_usize].io_segments[usize::from(current_segment)]
+                        };
+                    current_segment += 1;
+
+                    // Get new index
+                    let index = context.port.get_index();
+                    let word1 = low_word(logical_address);
+                    let word2 = high_word(logical_address);
+                    setup_datagram(
+                        &mut context.port.tx_buffers_mut()[usize::from(index)],
+                        CommandType::LogicalRead,
+                        index,
+                        word1,
+                        word2,
+                        &data[..sublength as usize],
+                    );
+                    let dc_offset = if first {
+                        first = false;
+                        // Fixed Pointer Read Multiple Write in second datagram
+                        let config_address = context
+                            .get_slave(context.grouplist[group_usize].dc_next.unwrap())
+                            .config_address;
+                        add_datagram(
+                            &mut context.port.tx_buffers_mut()[usize::from(index)],
+                            CommandType::LogicalRead,
+                            index,
+                            false,
+                            config_address,
+                            EthercatRegister::DistributedClockSystemTime.into(),
+                            &host_to_ethercat(context.dc_time).to_bytes(),
+                        ) as u16
+                    } else {
+                        0
+                    };
+
+                    // Send frame
+                    context.port.out_frame_red(index)?;
+
+                    // Push index and data pointer on stack
+                    context.index_stack.push_index(index, data, dc_offset);
+                    length -= sublength;
+                    logical_address += sublength;
+                    data = &data[sublength as usize..];
+
+                    if length == 0
+                        || current_segment >= context.grouplist[group_usize].used_segment_count
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // If outputs available generate logical write
+            if context.grouplist[group_usize].output_bytes != 0 {
+                let mut data = context.grouplist[group_usize].io_map();
+                let mut length = context.grouplist[group_usize].output_bytes;
+                let mut logical_address = context.grouplist[group_usize].logical_start_address;
+                let mut current_segment = 0;
+
+                // Segment transfer if needed
+                loop {
+                    let sub_length =
+                        context.grouplist[group_usize].io_segments[current_segment].min(length);
+                    current_segment += 1;
+
+                    // Get new index
+                    let index = context.port.get_index();
+                    let word1 = low_word(logical_address);
+                    let word2 = high_word(logical_address);
+
+                    setup_datagram(
+                        &mut context.port.tx_buffers_mut()[usize::from(index)],
+                        CommandType::FixedReadMultipleWrite,
+                        index,
+                        word1,
+                        word2,
+                        &data[..sub_length as usize],
+                    );
+                    let dc_offset = if first {
+                        first = false;
+
+                        // Fixed Pointer Read Multiple Write in second datagram
+                        add_datagram(
+                            &mut context.port.tx_buffers_mut()[usize::from(index)],
+                            CommandType::FixedReadMultipleWrite,
+                            index,
+                            false,
+                            context.slavelist[usize::from(
+                                context.grouplist[usize::from(group)].dc_next.unwrap(),
+                            )]
+                            .config_address,
+                            EthercatRegister::DistributedClockSystemTime.into(),
+                            &host_to_ethercat(context.dc_time).to_bytes(),
+                        ) as u16
+                    } else {
+                        0
+                    };
+
+                    // Send frame
+                    context.port.out_frame_red(index)?;
+
+                    // Push index and data pointer on stack
+                    context.index_stack.push_index(index, data, dc_offset);
+
+                    length -= sub_length;
+                    logical_address += sub_length;
+                    data = &data[sub_length as usize..];
+
+                    if length == 0
+                        || current_segment
+                            >= usize::from(context.grouplist[group_usize].used_segment_count)
+                    {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Logical read/write can be used
+            let mut data = if context.grouplist[group_usize].output_bytes == 0 {
+                // Clear offset, don't compensate for overlapping IOmap if there only are inputs
+                io_map_input_offset = 0;
+
+                context.grouplist[group_usize].inputs()
+            } else {
+                context.grouplist[group_usize].outputs()
+            };
+
+            // Segment transfer if needed
+            let mut current_segment = 0;
+            loop {
+                let sub_length = context.grouplist[group_usize].io_segments[current_segment];
+                current_segment += 1;
+
+                // Get new index
+                let index = context.port.get_index();
+                let word1 = low_word(logical_address);
+                let word2 = high_word(logical_address);
+
+                setup_datagram(
+                    &mut context.port.tx_buffers_mut()[usize::from(index)],
+                    CommandType::LogicalReadWrite,
+                    index,
+                    word1,
+                    word2,
+                    &data[..sub_length as usize],
+                );
+
+                let dc_offset = if first {
+                    first = false;
+
+                    //Fixed Pointer Read Multiple Write in second datagram
+                    add_datagram(
+                        &mut context.port.tx_buffers_mut()[usize::from(index)],
+                        CommandType::FixedReadMultipleWrite,
+                        index,
+                        false,
+                        context.slavelist
+                            [usize::from(context.grouplist[group_usize].dc_next.unwrap())]
+                        .config_address,
+                        EthercatRegister::DistributedClockSystemTime.into(),
+                        &host_to_ethercat(context.dc_time).to_bytes(),
+                    ) as u16
+                } else {
+                    0
+                };
+
+                // Send frame
+                context.port.out_frame_red(index)?;
+
+                // Push index and pointer on stack.
+                // The `iomap_input_offset` compensate for where the inputs are stored
+                // in the IOmap if we use an overlapping IOmap. If a regular IOmap is
+                // used, it should always be 0.
+                context.index_stack.push_index(
+                    index,
+                    &data[io_map_input_offset as usize..],
+                    dc_offset,
+                );
+                length -= sub_length;
+                logical_address += sub_length;
+                data = &data[sub_length as usize..];
+
+                if length == 0
+                    || current_segment
+                        >= usize::from(context.grouplist[group_usize].used_segment_count)
+                {
+                    break;
+                }
+            }
+        }
+        Ok(Self { group })
+    }
+
+    /// Transmit processdata to slaves.
+    /// Uses logical read/write or logical read + logical write if logical read/write is not
+    /// allowed (block logical read write).
+    /// Both the input and output processdata are transmitted in the overlapped IOmap.
+    /// The outputs with the actual data, the inputs replace the output data in the returning
+    /// frame. The inputs are gathered with the receive processdata function.
+    /// In contrast to the base lrw function, this function is non-blocking.
+    /// If the processdata doesn't fit in one datagram, multiple are used.
+    /// In order to recombine the slave response, a stack is used.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `group`: Group number
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - No inputs and no outputs were found in slave group
+    /// - Failed to transmit read IO request
+    ///
+    /// # Returns
+    /// `ProcessDataRequest` if processdata is transmitted, error otherwise
+    pub fn send_overlap_processdata_group(
+        context: &mut Context,
+        group: u8,
+    ) -> Result<Self, MainError> {
+        Self::main_send_processdata(context, group, true)
+    }
+
+    /// Transmit processdata to slaves.
+    /// Uses logical read/write or logical read + logical write if logical read/write is not
+    /// allowed (block logical read/write).
+    /// Both the input and output processdata are transmitted.
+    /// The outputs with the actual data, the inputs have a placeholder.
+    /// The inputs are gathered with the receive processdata function.
+    /// In contrast to the logical read/write function, this function is non-blocking.
+    /// If the processdata doesn't fit in one datagram, multiple are used.
+    /// In order to recombine the slave response, a stack is used.
+    ///
+    /// # Parameters
+    /// `context`: Context struct
+    /// `group`: Group number
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - No inputs and no outputs were found in slave group
+    /// - Failed to transmit read IO request
+    ///
+    /// # Returns
+    /// `ProcessDataRequest` if processdata is transmitted, error otherwise
+    pub fn send_processdata_group(context: &mut Context, group: u8) -> Result<Self, MainError> {
+        Self::main_send_processdata(context, group, false)
+    }
+
+    /// # Errors
+    /// Returns an error if:
+    /// - No inputs and no outputs were found
+    /// - Failed to transmit read IO request
+    pub fn send_processdata(context: &mut Context) -> Result<Self, MainError> {
+        Self::send_processdata_group(context, 0)
+    }
+
+    /// # Errors
+    /// Returns an error if:
+    /// - No inputs and no outputs were found
+    /// - Failed to transmit read IO request
+    pub fn send_overlap_processdata(context: &mut Context) -> Result<Self, MainError> {
+        Self::send_overlap_processdata_group(context, 0)
+    }
+
+    /// Receive processdata from slaves.
+    /// Second part of `Self::send_processdata`.
+    /// Received datagrams are recombined with the processdata with help from the stack.
+    /// If a datagram contains input processdata, it copies it to the processdata structure.
+    ///
+    /// # Parameters
+    /// `self`: ProcessDataRequest struct containing the group number
+    /// `context`: Context struct
+    /// `timeout`: Timeout duration
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - No frame was received
+    ///
+    /// # Returns workcounter
+    pub fn receive_processdata_group(
+        self,
+        context: &mut Context,
+        timeout: Duration,
+    ) -> Result<u16, MainError> {
+        let mut wkc2;
+        let mut wkc = 0;
+        let mut valid_work_counter = false;
+
+        while let Some(position) = context.index_stack.pull_index() {
+            let position_usize = usize::from(position);
+            let index = context.index_stack.index[position_usize];
+            wkc2 = context.port.wait_in_frame(index, timeout);
+
+            // Check if the frame contains input data
+            let Ok(work_counter2_value) = wkc2 else {
+                continue;
+            };
+
+            let command_type = CommandType::try_from(
+                context.port.rx_buffers_mut()[usize::from(index)][ETHERCAT_COMMAND_OFFET],
+            );
+
+            let index_usize = usize::from(index);
+            if matches!(
+                command_type,
+                Ok(CommandType::LogicalRead | CommandType::LogicalReadWrite)
+            ) {
+                if context.index_stack.dc_offset[position_usize] != 0 {
+                    context.index_stack.data[position_usize].copy_from_slice(
+                        &context.port.rx_buffers_mut()[index_usize][ETHERCAT_HEADER_SIZE..],
+                    );
+                    let mut word = [0; 2];
+                    word.copy_from_slice(
+                        &context.port.rx_buffers_mut()[index_usize][ETHERCAT_HEADER_SIZE
+                            + context.index_stack.data[position_usize].len()..],
+                    );
+                    wkc = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                    let mut long_word = [0; 8];
+                    long_word.copy_from_slice(
+                        &context.port.rx_buffers_mut()[index_usize]
+                            [usize::from(context.index_stack.dc_offset[position_usize])..],
+                    );
+                    context.dc_time = ethercat_to_host(Ethercat::<i64>::from_bytes(long_word));
+                } else {
+                    // Copy input data back to process data buffer
+                    context.index_stack.data[position_usize].copy_from_slice(
+                        &context.port.rx_buffers_mut()[index_usize][ETHERCAT_HEADER_SIZE..],
+                    );
+                    wkc += work_counter2_value;
+                }
+                valid_work_counter = true;
+            } else if context.port.rx_buffers()[usize::from(index)][ETHERCAT_COMMAND_OFFET]
+                == u8::from(CommandType::LogicalWrite)
+            {
+                if context.index_stack.dc_offset[usize::from(position)] != 0 {
+                    let mut word = [0; ETHERCAT_WORK_COUNTER_SIZE];
+                    word.copy_from_slice(
+                        &context.port.rx_buffers()[usize::from(index)][ETHERCAT_HEADER_SIZE
+                            + context.index_stack.data[usize::from(position)].len()..],
+                    );
+
+                    // Output WKC counts 2 times when using logical read write, emulate the same
+                    // for logical write.
+                    wkc = ethercat_to_host(Ethercat::<u16>::from_bytes(word)) * 2;
+                    let mut long = [0; 8];
+                    long.copy_from_slice(
+                        &context.port.rx_buffers()[usize::from(index)]
+                            [usize::from(context.index_stack.dc_offset[usize::from(position)])..],
+                    );
+                    context.dc_time = ethercat_to_host(Ethercat::<i64>::from_bytes(long));
+                } else {
+                    // Output WKC counts 2 times when using Logical Read/Write, emulate the same
+                    // for Logical Write.
+                    wkc += wkc2? * 2;
+                }
+                valid_work_counter = true;
+            }
+
+            // Release buffer
+            context
+                .port
+                .set_buf_stat(usize::from(index), BufferState::Empty);
+        }
+
+        context.index_stack.clear_index();
+
+        // If no frame has arrived
+        if valid_work_counter {
+            Ok(wkc)
+        } else {
+            Err(MainError::NoFrame)
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if:
+    /// - No frame was received
+    pub fn receive_processdata(
+        self,
+        context: &mut Context,
+        timeout: Duration,
+    ) -> Result<u16, MainError> {
+        self.receive_processdata_group(context, timeout)
+    }
+}
+
 fn fixed_pointer_read_multi(
     context: &mut Context,
     number: u16,
@@ -3368,7 +4470,7 @@ fn fixed_pointer_read_multi(
     let index = port.get_index();
     let mut sl_count: u16 = 0;
     setup_datagram(
-        &mut port.tx_buffers.lock().unwrap()[usize::from(index)],
+        &mut port.tx_buffers_mut()[usize::from(index)],
         CommandType::FixedPointerRead,
         index,
         config_list[usize::from(sl_count)],
@@ -3380,7 +4482,7 @@ fn fixed_pointer_read_multi(
     sl_count += 1;
     for sl_count in sl_count..number - 1 {
         sl_data_position[usize::from(sl_count)] = add_datagram(
-            &mut port.tx_buffers.lock().unwrap()[usize::from(index)],
+            &mut port.tx_buffers_mut()[usize::from(index)],
             CommandType::FixedPointerRead,
             index,
             true,
@@ -3392,7 +4494,7 @@ fn fixed_pointer_read_multi(
     sl_count = sl_count.max(number - 1);
     if sl_count < number {
         sl_data_position[usize::from(sl_count)] = add_datagram(
-            &mut port.tx_buffers.lock().unwrap()[usize::from(index)],
+            &mut port.tx_buffers_mut()[usize::from(index)],
             CommandType::FixedPointerRead,
             index,
             false,
@@ -3404,23 +4506,11 @@ fn fixed_pointer_read_multi(
     port.src_confirm(index, timeout)?;
     for sl_count in 0..number {
         sl_status_list[usize::from(sl_count)] = ApplicationLayerStatus::read_from(
-            &mut &port.rx_buf.lock().unwrap()[usize::from(index)].as_mut_slice()
+            &mut &port.rx_buffers_mut()[usize::from(index)].as_mut_slice()
                 [sl_data_position[usize::from(sl_count)]..],
         )?;
     }
 
     port.set_buf_stat(usize::from(index), BufferState::Empty);
     Ok(())
-}
-
-/// Get index of next mailbox counter value.
-/// Used for Mailbox Lik Layer.
-///
-/// # Parameters
-/// `count`: Mailbox counter value 1..=7
-///
-/// # Returns next mailbox counter value
-pub const fn next_mailbox_count(count: u8) -> u8 {
-    // Wraps around to 1, not 0 for a range of 1..=7
-    count % 7 + 1
 }

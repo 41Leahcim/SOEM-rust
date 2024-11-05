@@ -1,11 +1,6 @@
 //! Parent module for low level operations.
 
-use std::{ffi::CStr, str::FromStr};
-
-use libc::if_nameindex;
 use num_traits::PrimInt;
-
-use crate::ethercat::main::Adapter;
 
 pub mod nicdrv;
 
@@ -40,28 +35,4 @@ pub fn network_to_host<Int: PrimInt>(network_short: Network<Int>) -> Int {
     } else {
         network_short.0
     }
-}
-
-/// Create list over available network adapters.
-///
-/// # Panics
-/// Panics if the name of an interface is too long
-///
-/// # Returns
-/// First element in linked list of adapters
-pub fn find_adaters() -> Vec<Adapter> {
-    // Iterate all devices and create a local copy holding the name and description
-    let ids = unsafe { if_nameindex() };
-    (0..usize::MAX)
-        .filter_map(|i| unsafe { ids.add(i).as_mut() })
-        .take_while(|id| id.if_index != 0)
-        .map(|id| {
-            // Fetch description and name, in Linux they are the same.
-            let name =
-                heapless::String::from_str(unsafe { CStr::from_ptr(id.if_name) }.to_str().unwrap())
-                    .unwrap();
-            let desc = name.clone();
-            Adapter { name, desc }
-        })
-        .collect()
 }

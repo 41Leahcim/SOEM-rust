@@ -7,10 +7,7 @@
 //! increasing. For fast systems running Xenomai and RT-net or alike the
 //! timeouts need to be shorter.
 
-use std::{
-    array,
-    time::{Duration, SystemTime},
-};
+use std::{array, time::Duration};
 
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use num_traits::PrimInt;
@@ -121,13 +118,13 @@ pub enum EthernetHeaderError {
 #[derive(Debug, Clone, Copy)]
 pub struct EthernetHeader {
     /// Destination MAC
-    pub destination_address: [Network<u16>; 3],
+    destination_address: [Network<u16>; 3],
 
     // Source MAC
-    pub source_address: [Network<u16>; 3],
+    source_address: [Network<u16>; 3],
 
     /// Ethernet type
-    pub etype: Network<u16>,
+    etype: Network<u16>,
 }
 
 impl EthernetHeader {
@@ -140,6 +137,18 @@ impl EthernetHeader {
             source_address,
             etype,
         }
+    }
+
+    pub const fn source_address(&self) -> &[Network<u16>; 3] {
+        &self.source_address
+    }
+
+    pub fn source_address_mut(&mut self) -> &mut [Network<u16>; 3] {
+        &mut self.source_address
+    }
+
+    pub const fn ethernet_type(&self) -> Network<u16> {
+        self.etype
     }
 }
 
@@ -204,23 +213,81 @@ impl From<InvalidCommandType> for EthercatHeaderError {
 #[derive(Debug, Clone, Copy)]
 pub struct EthercatHeader {
     /// Length of etherCAT datagram
-    pub ethercat_length: Ethercat<u16>,
+    ethercat_length: Ethercat<u16>,
 
     /// EtherCAT command
-    pub command: CommandType,
+    command: CommandType,
 
     /// Index used in SOEM for Tx to Rx recombination
-    pub index: u8,
+    index: u8,
 
     /// EtherCAT address
-    pub address_position: Ethercat<u16>,
-    pub address_offset: Ethercat<u16>,
+    address_position: Ethercat<u16>,
+    address_offset: Ethercat<u16>,
 
     /// Length of data position in datagram
-    pub data_length: Ethercat<u16>,
+    data_length: Ethercat<u16>,
 
     /// Interrupt, currently unused
-    pub interrupt: u16,
+    interrupt: u16,
+}
+
+impl EthercatHeader {
+    pub const fn new(
+        ethercat_length: Ethercat<u16>,
+        command: CommandType,
+        index: u8,
+        address_position: Ethercat<u16>,
+        address_offset: Ethercat<u16>,
+        data_length: Ethercat<u16>,
+        interrupt: u16,
+    ) -> Self {
+        Self {
+            ethercat_length,
+            command,
+            index,
+            address_position,
+            address_offset,
+            data_length,
+            interrupt,
+        }
+    }
+
+    pub fn ethercat_length_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.ethercat_length
+    }
+
+    pub const fn ethercat_length(&self) -> Ethercat<u16> {
+        self.ethercat_length
+    }
+
+    pub fn data_length_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.data_length
+    }
+
+    pub const fn data_length(&self) -> Ethercat<u16> {
+        self.data_length
+    }
+
+    pub fn command_mut(&mut self) -> &mut CommandType {
+        &mut self.command
+    }
+
+    pub const fn index(&self) -> u8 {
+        self.index
+    }
+
+    pub fn index_mut(&mut self) -> &mut u8 {
+        &mut self.index
+    }
+
+    pub fn address_position_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.address_position
+    }
+
+    pub fn address_offset_mut(&mut self) -> &mut Ethercat<u16> {
+        &mut self.address_offset
+    }
 }
 
 impl TryFrom<&[u8]> for EthercatHeader {
@@ -851,13 +918,38 @@ impl TryFrom<u8> for FileOverEthercatOpcode {
     }
 }
 
-pub enum ServoOverEthercatOpcodes {
+pub struct InvalidServoOverEthercatOpcode(u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServoOverEthercatOpcode {
     ReadRequest = 1,
     ReadResponse,
     WriteRequest,
     WriteResponse,
     Notification,
     Emergency,
+}
+
+impl From<ServoOverEthercatOpcode> for u8 {
+    fn from(value: ServoOverEthercatOpcode) -> Self {
+        value as u8
+    }
+}
+
+impl TryFrom<u8> for ServoOverEthercatOpcode {
+    type Error = InvalidServoOverEthercatOpcode;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::ReadRequest),
+            2 => Ok(Self::ReadResponse),
+            3 => Ok(Self::WriteRequest),
+            4 => Ok(Self::WriteResponse),
+            5 => Ok(Self::Notification),
+            6 => Ok(Self::Emergency),
+            _ => Err(InvalidServoOverEthercatOpcode(value)),
+        }
+    }
 }
 
 pub enum EthercatRegister {
@@ -1039,30 +1131,6 @@ pub enum AbortError {
         word2: u16,
     },
     TooManyMasterBufferEntries = 0x0F00_0000,
-}
-
-/// Struct to retrieve errors
-#[derive(Debug, Clone, Copy)]
-pub struct ErrorInfo {
-    /// TIme at which the error was generated
-    pub time: SystemTime,
-
-    /// Signal bit, error set but not read
-    pub signal: bool,
-
-    /// Slave number that generated the error
-    pub slave: u16,
-
-    /// GoE Service Data Object index that generated the error
-    pub index: u16,
-
-    /// GoE Service Data Object subindex that generated the error
-    pub sub_index: u8,
-
-    /// Type of error
-    pub error_type: ErrorType,
-
-    pub abort_error: AbortError,
 }
 
 /// Sets the count value in the mailbox header.

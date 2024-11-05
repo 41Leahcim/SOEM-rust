@@ -15,6 +15,36 @@ pub const PORTM: [u8; 4] = [1, 2, 4, 8];
 /// First sync pulse delay
 pub const SYNC_DELAY: Duration = Duration::from_millis(100);
 
+#[derive(Debug, Default)]
+pub struct DistributedClock {
+    /// DC receivetimes on port A
+    receive_time_a: Duration,
+
+    /// DC receivetimes on port B
+    receive_time_b: Duration,
+
+    /// DC receivetimes on port C
+    receive_time_c: Duration,
+
+    /// DC receivetimes on port D
+    receive_time_d: Duration,
+
+    /// Next DC slave
+    next: u16,
+
+    /// Previous DC slave
+    previous: u16,
+
+    /// DC cycle received in nanoseconds
+    cycle: Duration,
+
+    /// DC shift from clock modulus boundary
+    shift: i32,
+
+    /// DC sync activation
+    active: bool,
+}
+
 /// Set DC of slave to fire sync0 at `cycle_time` interval with `cycle_shift` offset.
 ///
 /// # Parameters
@@ -37,13 +67,12 @@ pub fn dsync0(
     cycle_time: Duration,
     cycle_shift: i32,
 ) -> Result<(), NicdrvError> {
-    let slave_usize = usize::from(slave);
-    let slave_address = context.slavelist[slave_usize].config_address;
+    let slave_address = context.get_slave(slave).config_address();
 
     // Stop cyclic operation, ready for next trigger
     let mut ra = 0;
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockSynchronizationActive.into(),
         &mut [ra],
@@ -58,7 +87,7 @@ pub fn dsync0(
     // Write access to ethercat
     let h = 0;
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockControlUnit.into(),
         &mut [h],
@@ -67,7 +96,7 @@ pub fn dsync0(
 
     // Read local time of slave
     let time1 = ethercat_to_host(fprdll(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockSystemTime,
         TIMEOUT_RETURN,
@@ -89,7 +118,7 @@ pub fn dsync0(
 
     // SYNC0 start time
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockStart0.into(),
         &mut time.to_bytes(),
@@ -99,7 +128,7 @@ pub fn dsync0(
     let time_cycle = host_to_ethercat(cycle_time.as_nanos() as u32);
     // SYNC0 cycle time
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockCycle0.into(),
         &mut time_cycle.to_bytes(),
@@ -108,7 +137,7 @@ pub fn dsync0(
 
     // Active cyclic operation
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockSynchronizationActive.into(),
         &mut [ra],
@@ -116,9 +145,19 @@ pub fn dsync0(
     )?;
 
     // Update Slave state
-    context.slavelist[slave_usize].dc_active = active;
-    context.slavelist[slave_usize].dc_shift = cycle_shift;
-    context.slavelist[slave_usize].dc_cycle = cycle_time;
+    let slave = context.get_slave_mut(slave);
+    if let Some(distributed_clock) = slave.distributed_clock_mut() {
+        distributed_clock.active = active;
+        distributed_clock.shift = cycle_shift;
+        distributed_clock.cycle = cycle_time;
+    } else {
+        slave.set_distributed_clock(DistributedClock {
+            active,
+            shift: cycle_shift,
+            cycle: cycle_time,
+            ..Default::default()
+        });
+    }
     Ok(())
 }
 
@@ -149,18 +188,16 @@ pub fn dsync01(
     cycle_time1: Duration,
     cycle_shift: i32,
 ) -> Result<(), NicdrvError> {
-    let slave_usize = usize::from(slave);
-
     // Sync1 can be used as a multiple of sync0, use true cycle time
     let true_cycle_time =
         cycle_time0 * (cycle_time1.as_nanos() / cycle_time0.as_nanos() + 1) as u32;
 
-    let slave_address = context.slavelist[slave_usize].config_address;
+    let slave_address = context.get_slave(slave).config_address();
     let mut ra = 0;
 
     // Stop cyclic operation, ready for next trigger
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockSynchronizationActive.into(),
         &mut [ra],
@@ -175,7 +212,7 @@ pub fn dsync01(
     // Write access to ethercat
     let h = 0;
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockControlUnit.into(),
         &mut [h],
@@ -185,7 +222,7 @@ pub fn dsync01(
     // Read local time of slave
 
     let time1 = ethercat_to_host(fprdll(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockSystemTime,
         TIMEOUT_RETURN,
@@ -207,7 +244,7 @@ pub fn dsync01(
 
     // SYNC0 start time
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockStart0.into(),
         &mut time.to_bytes(),
@@ -217,7 +254,7 @@ pub fn dsync01(
     // SYNC0 cycle time
     let mut time_cycle = host_to_ethercat(cycle_time0.as_nanos() as u32);
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockCycle0.into(),
         &mut time_cycle.to_bytes(),
@@ -226,14 +263,14 @@ pub fn dsync01(
 
     time_cycle = host_to_ethercat(cycle_time1.as_nanos() as u32);
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockCycle1.into(),
         &mut time_cycle.to_bytes(),
         TIMEOUT_RETURN,
     )?;
     fpwr(
-        &mut context.port,
+        context.port_mut(),
         slave_address,
         EthercatRegister::DistributedClockSynchronizationActive.into(),
         &mut [ra],
@@ -241,27 +278,38 @@ pub fn dsync01(
     )?;
 
     // Update Slave state
-    context.slavelist[slave_usize].dc_active = active;
-    context.slavelist[slave_usize].dc_shift = cycle_shift;
-    context.slavelist[slave_usize].dc_cycle = cycle_time0;
+    if let Some(distributed_clock) = context.get_slave_mut(slave).distributed_clock_mut() {
+        distributed_clock.active = active;
+        distributed_clock.shift = cycle_shift;
+        distributed_clock.cycle = cycle_time0;
+    } else {
+        context
+            .get_slave_mut(slave)
+            .set_distributed_clock(DistributedClock {
+                active,
+                shift: cycle_shift,
+                cycle: cycle_time0,
+                ..Default::default()
+            });
+    }
     Ok(())
 }
 
 /// Latched port time of slave
-fn port_time(context: &mut Context, slave: u16, port: u8) -> Duration {
-    let slave = &context.slavelist[usize::from(slave)];
-    match port {
-        0 => slave.dc_rt_a,
-        1 => slave.dc_rt_b,
-        2 => slave.dc_rt_c,
-        3 => slave.dc_rt_d,
+fn port_time(context: &mut Context, slave: u16, port: u8) -> Option<Duration> {
+    let slave = context.get_slave_mut(slave).distributed_clock_mut()?;
+    Some(match port {
+        0 => slave.receive_time_a,
+        1 => slave.receive_time_b,
+        2 => slave.receive_time_c,
+        3 => slave.receive_time_d,
         _ => Duration::default(),
-    }
+    })
 }
 
 /// Calculate previous active port of slave
 fn previous_port(context: &mut Context, slave: u16, port: u8) -> u8 {
-    let a_port = context.slavelist[usize::from(slave)].active_ports;
+    let a_port = context.get_slave(slave).active_ports();
     match port {
         0 => {
             if a_port & PORTM[2] != 0 {
@@ -314,7 +362,7 @@ fn previous_port(context: &mut Context, slave: u16, port: u8) -> u8 {
 /// Search unconsumed ports in parent, consume and return first open port
 fn parent_port(context: &mut Context, parent: u16) -> u8 {
     // Search order is important here, 3 - 1 - 2 - 0
-    let mut consumed_ports = context.slavelist[usize::from(parent)].consumed_ports;
+    let mut consumed_ports = context.get_slave(parent).consumed_ports();
     let parent_port = if consumed_ports & PORTM[3] != 0 {
         consumed_ports &= !PORTM[3];
         3
@@ -328,7 +376,7 @@ fn parent_port(context: &mut Context, parent: u16) -> u8 {
         consumed_ports &= !PORTM[0];
         0
     };
-    context.slavelist[usize::from(parent)].consumed_ports = consumed_ports;
+    *context.get_slave_mut(parent).consumed_ports_mut() = consumed_ports;
     parent_port
 }
 
@@ -346,13 +394,13 @@ fn parent_port(context: &mut Context, parent: u16) -> u8 {
 /// # Returns
 /// Whether any slaves were found with Digital Clock
 pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
-    context.slavelist[0].has_dc = false;
-    context.grouplist[0].has_dc = false;
+    context.get_slave_mut(0).remove_distributed_clock();
+    context.get_group_mut(0).remove_distributed_clock();
 
     // Latch Digital clock receive time a of all slaves
     let mut long = [0; 4];
     bwr(
-        &mut context.port,
+        context.port_mut(),
         0,
         EthercatRegister::DistributedClockTime0,
         &mut long,
@@ -367,30 +415,38 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
 
     let mut previous_dc_slave = 0;
     let mut parent_hold = 0;
-    for i in 1..=context.slave_count {
-        let i_usize = usize::from(i);
-        if context.slavelist[i_usize].has_dc {
-            if context.slavelist[0].has_dc {
-                context.slavelist[usize::from(previous_dc_slave)].dc_next = i;
-                context.slavelist[i_usize].dc_previous = previous_dc_slave;
+    for i in 1..=context.slave_count() {
+        let mut distributed_clock = DistributedClock::default();
+        if context.get_slave(i).distributed_clock().is_some() {
+            if let Some(previous_dc) = context
+                .get_slave_mut(previous_dc_slave)
+                .distributed_clock_mut()
+            {
+                previous_dc.next = i;
+                distributed_clock.previous = previous_dc_slave;
             } else {
-                context.slavelist[0].has_dc = true;
-                context.slavelist[0].dc_next = i;
-                context.slavelist[i_usize].dc_previous = 0;
-                context.grouplist[usize::from(context.slavelist[i_usize].group)].has_dc = true;
-                context.grouplist[usize::from(context.slavelist[i_usize].group)].dc_next = i;
+                context
+                    .get_slave_mut(0)
+                    .set_distributed_clock(DistributedClock {
+                        next: i,
+                        ..Default::default()
+                    });
+                distributed_clock.previous = 0;
+                context
+                    .get_group_mut(context.get_slave(i).group())
+                    .set_distributed_clock_next(i);
             }
 
             // This branch has DC slave so remove parenthold
             previous_dc_slave = i;
-            let slave_address = context.slavelist[i_usize].config_address;
+            let slave_address = context.get_slave(i).config_address();
             ht = fprdl(
-                &mut context.port,
+                context.port_mut(),
                 slave_address,
                 EthercatRegister::DistributedClockTime0,
                 TIMEOUT_RETURN,
             )?;
-            context.slavelist[i_usize].dc_rt_a =
+            distributed_clock.receive_time_a =
                 Duration::from_nanos(u64::from(ethercat_to_host(ht)));
 
             // 64-bit latched DC receive time A of each specific slave
@@ -398,7 +454,7 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
             // Use it as offset in order to set local time around 0 + mastertime
             let hrt = host_to_ethercat(
                 -((ethercat_to_host(fprdll(
-                    &mut context.port,
+                    context.port_mut(),
                     slave_address,
                     EthercatRegister::DistributedClockStartOfFrame,
                     TIMEOUT_RETURN,
@@ -407,30 +463,30 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
 
             // Save it in the offset register
             fpwr(
-                &mut context.port,
+                context.port_mut(),
                 slave_address,
                 EthercatRegister::DistributedClockSystemOffset.into(),
                 &mut hrt.to_bytes(),
                 TIMEOUT_RETURN,
             )?;
 
-            context.slavelist[i_usize].dc_rt_b =
+            distributed_clock.receive_time_b =
                 Duration::from_nanos(u64::from(ethercat_to_host(fprdl(
-                    &mut context.port,
+                    context.port_mut(),
                     slave_address,
                     EthercatRegister::DistributedClockTime1,
                     TIMEOUT_RETURN,
                 )?)));
-            context.slavelist[i_usize].dc_rt_c =
+            distributed_clock.receive_time_c =
                 Duration::from_nanos(u64::from(ethercat_to_host(fprdl(
-                    &mut context.port,
+                    context.port_mut(),
                     slave_address,
                     EthercatRegister::DistributedClockTime2,
                     TIMEOUT_RETURN,
                 )?)));
-            context.slavelist[i_usize].dc_rt_d =
+            distributed_clock.receive_time_d =
                 Duration::from_nanos(u64::from(ethercat_to_host(fprdl(
-                    &mut context.port,
+                    context.port_mut(),
                     slave_address,
                     EthercatRegister::DistributedClockTime3,
                     TIMEOUT_RETURN,
@@ -440,24 +496,24 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
             let mut plist: [u8; 4] = [0; 4];
             let mut time_list = [Duration::default(); 4];
             let mut nlist = 0;
-            if context.slavelist[i_usize].active_ports & PORTM[0] != 0 {
+            if context.get_slave(i).active_ports() & PORTM[0] != 0 {
                 plist[nlist] = 0;
-                time_list[nlist] = context.slavelist[i_usize].dc_rt_a;
+                time_list[nlist] = distributed_clock.receive_time_a;
                 nlist += 1;
             }
-            if context.slavelist[i_usize].active_ports & PORTM[3] != 0 {
+            if context.get_slave(i).active_ports() & PORTM[3] != 0 {
                 plist[nlist] = 3;
-                time_list[nlist] = context.slavelist[i_usize].dc_rt_d;
+                time_list[nlist] = distributed_clock.receive_time_d;
                 nlist += 1;
             }
-            if context.slavelist[i_usize].active_ports & PORTM[1] != 0 {
+            if context.get_slave(i).active_ports() & PORTM[1] != 0 {
                 plist[nlist] = 1;
-                time_list[nlist] = context.slavelist[i_usize].dc_rt_b;
+                time_list[nlist] = distributed_clock.receive_time_b;
                 nlist += 1;
             }
-            if context.slavelist[i_usize].active_ports & PORTM[2] != 0 {
+            if context.get_slave(i).active_ports() & PORTM[2] != 0 {
                 plist[nlist] = 2;
-                time_list[nlist] = context.slavelist[i_usize].dc_rt_c;
+                time_list[nlist] = distributed_clock.receive_time_c;
                 nlist += 1;
             }
 
@@ -470,18 +526,18 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
                 }
             }
             entry_port = plist[usize::from(entry_port)];
-            context.slavelist[i_usize].entry_port = entry_port;
+            *context.get_slave_mut(i).entry_port_mut() = entry_port;
 
             // Consume entryport from active ports
-            context.slavelist[i_usize].consumed_ports &= !(1 << entry_port);
+            *context.get_slave_mut(i).consumed_ports_mut() &= !(1 << entry_port);
 
             // Finding digital clock parent of current
             let mut parent = i;
             let mut child;
             loop {
                 child = parent;
-                parent = u16::from(context.slavelist[usize::from(parent)].parent);
-                if parent == 0 || context.slavelist[usize::from(parent)].has_dc {
+                parent = u16::from(context.get_slave(parent).parent());
+                if parent == 0 || context.get_slave(parent).distributed_clock().is_none() {
                     break;
                 }
             }
@@ -489,31 +545,34 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
             // Only calculate propagation delay if slave is not the first
             if parent > 0 {
                 // Find port on parent this slave is connected to
-                context.slavelist[i_usize].parent = parent_port(context, parent);
-                if context.slavelist[usize::from(parent)].topology == 1 {
-                    context.slavelist[i_usize].parent_port =
-                        context.slavelist[usize::from(parent)].entry_port;
+                *context.get_slave_mut(i).parent_mut() = parent_port(context, parent);
+                if context.get_slave(parent).topology() == 1 {
+                    *context.get_slave_mut(i).parent_port_mut() =
+                        context.get_slave(parent).entry_port();
                 }
 
                 // Delta time of parentport - 1 - parentport
                 // Note: order of ports is 0 - 3 - 1 - 2
                 // Non active ports are skipped
                 let previous_active_port_parent =
-                    previous_port(context, parent, context.slavelist[i_usize].parent_port);
-                let delta_time3 =
-                    port_time(context, parent, context.slavelist[i_usize].parent_port)
-                        .abs_diff(port_time(context, parent, previous_active_port_parent));
+                    previous_port(context, parent, context.get_slave(i).parent_port());
+                let delta_time3 = port_time(context, parent, context.get_slave(i).parent_port())
+                    .unwrap_or_default()
+                    .abs_diff(
+                        port_time(context, parent, previous_active_port_parent).unwrap_or_default(),
+                    );
 
                 // Current slave has children.
                 // Those children's delays need to be subtracted
                 let previous_active_port =
-                    previous_port(context, i, context.slavelist[i_usize].entry_port);
-                let delta_time1 = if context.slavelist[i_usize].topology > 1 {
-                    port_time(context, i, previous_active_port).abs_diff(port_time(
-                        context,
-                        i,
-                        context.slavelist[i_usize].entry_port,
-                    ))
+                    previous_port(context, i, context.get_slave(i).entry_port());
+                let delta_time1 = if context.get_slave(i).topology() > 1 {
+                    port_time(context, i, previous_active_port)
+                        .unwrap_or_default()
+                        .abs_diff(
+                            port_time(context, i, context.get_slave(i).entry_port())
+                                .unwrap_or_default(),
+                        )
                 } else {
                     Duration::default()
                 };
@@ -521,27 +580,28 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
                 // Current slave is not the first child of parent
                 // Previous child's delays need to be added
                 let delta_time2 = if child - parent > 1 {
-                    port_time(context, parent, previous_active_port_parent).abs_diff(port_time(
-                        context,
-                        parent,
-                        context.slavelist[usize::from(parent)].entry_port,
-                    ))
+                    port_time(context, parent, previous_active_port_parent)
+                        .unwrap_or_default()
+                        .abs_diff(
+                            port_time(context, parent, context.get_slave(parent).entry_port())
+                                .unwrap_or_default(),
+                        )
                 } else {
                     Duration::default()
                 };
 
                 // Calculate current slave delay from delta times.
                 // Assumption: Forward delay equals return delay
-                context.slavelist[i_usize].propagation_delay = ((delta_time3 - delta_time1) / 2)
+                *context.get_slave_mut(i).propagation_delay_mut() = ((delta_time3 - delta_time1)
+                    / 2)
                     + delta_time2
-                    + context.slavelist[usize::from(parent)].propagation_delay;
+                    + context.get_slave(parent).propagation_delay();
 
                 // Write propagation delay
-                let ht = host_to_ethercat(
-                    context.slavelist[i_usize].propagation_delay.as_nanos() as i32
-                );
+                let ht =
+                    host_to_ethercat(context.get_slave(i).propagation_delay().as_nanos() as i32);
                 fpwr(
-                    &mut context.port,
+                    context.port_mut(),
                     slave_address,
                     EthercatRegister::DistributedClockSystemDelay.into(),
                     &mut ht.to_bytes(),
@@ -549,24 +609,24 @@ pub fn config_dc(context: &mut Context) -> Result<bool, NicdrvError> {
                 )?;
             }
         } else {
-            context.slavelist[i_usize].dc_rt_a = Duration::default();
-            context.slavelist[i_usize].dc_rt_b = Duration::default();
-            context.slavelist[i_usize].dc_rt_c = Duration::default();
-            context.slavelist[i_usize].dc_rt_d = Duration::default();
-            let parent = context.slavelist[i_usize].parent;
+            distributed_clock.receive_time_a = Duration::default();
+            distributed_clock.receive_time_b = Duration::default();
+            distributed_clock.receive_time_c = Duration::default();
+            distributed_clock.receive_time_d = Duration::default();
+            let parent = context.get_slave(i).parent();
 
             // If non DC slave found on first position on branch, hold root parent
-            if parent > 0 && context.slavelist[usize::from(parent)].topology > 2 {
+            if parent > 0 && context.get_slave(u16::from(parent)).topology() > 2 {
                 parent_hold = u16::from(parent);
             }
 
             // If branch has no DC slaves, consume port on root parent
-            if parent_hold != 0 && context.slavelist[i_usize].topology == 1 {
+            if parent_hold != 0 && context.get_slave(i).topology() == 1 {
                 parent_port(context, parent_hold);
                 parent_hold = 0;
             }
         }
     }
 
-    Ok(context.slavelist[0].has_dc)
+    Ok(context.get_slave(0).distributed_clock().is_some())
 }

@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime};
 
 pub struct OsalTimer {
-    pub stop_time: SystemTime,
+    stop_time: SystemTime,
 }
 
 impl OsalTimer {
