@@ -205,7 +205,7 @@ impl ServoOverEthercat {
     pub fn read_from<R: Read>(reader: &mut R) -> Result<Self, ServoOverEthercatError> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
         let mut bytes = [0; 5];
-        reader.read_exact(&mut bytes);
+        reader.read_exact(&mut bytes)?;
         let opcode = ServoOverEthercatOpcode::try_from(bytes[0])?;
         let incomplete = bytes[1] != 0;
         let error = bytes[2];

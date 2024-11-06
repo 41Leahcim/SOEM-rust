@@ -578,6 +578,7 @@ pub struct Slave<'slave> {
     /// IOmap buffer
     io_map: &'slave [u8],
     input_offset: u32,
+    output_offset: u32,
 
     /// Startbit in first output byte
     output_startbit: u8,
@@ -948,16 +949,33 @@ impl<'slave> Slave<'slave> {
     }
 
     pub fn input(&self) -> Option<&[u8]> {
+        let start = self.output_offset as usize
+            + usize::from(self.output_bytes)
+            + self.input_offset as usize;
         self.io_map
-            .get(usize::from(self.output_bytes) + self.input_offset as usize..)
+            .get(start..start + usize::from(self.input_bytes))
     }
 
     pub fn input_offset_mut(&mut self) -> &mut u32 {
         &mut self.input_offset
     }
 
-    pub fn outputs(&self) -> &'slave [u8] {
-        &self.io_map[..usize::from(self.output_bytes)]
+    pub fn outputs(&self) -> Option<&'slave [u8]> {
+        let start = self.output_offset as usize;
+        self.io_map
+            .get(start..start + usize::from(self.output_bytes))
+    }
+
+    pub fn output_offset_mut(&mut self) -> &mut u32 {
+        &mut self.output_offset
+    }
+
+    pub const fn output_startbit(&self) -> u8 {
+        self.output_startbit
+    }
+
+    pub fn output_startbit_mut(&mut self) -> &mut u8 {
+        &mut self.output_startbit
     }
 
     pub fn io_map_mut(&mut self) -> &mut &'slave [u8] {
