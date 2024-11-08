@@ -1,15 +1,15 @@
 //! Module for debugging and time measurement.
 
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 pub struct OsalTimer {
-    stop_time: SystemTime,
+    stop_time: Instant,
 }
 
 impl OsalTimer {
     pub fn new(timeout: Duration) -> Self {
         Self {
-            stop_time: SystemTime::now() + timeout,
+            stop_time: Instant::now() + timeout,
         }
     }
 
@@ -18,7 +18,7 @@ impl OsalTimer {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.stop_time.elapsed().is_ok()
+        Instant::now() >= self.stop_time
     }
 }
 
