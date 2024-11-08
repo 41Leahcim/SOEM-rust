@@ -60,7 +60,7 @@ pub struct DistributedClock {
 ///
 /// # Returns
 /// Ok(()) or NicdrvError
-pub fn dsync0(
+pub fn dcsync0(
     context: &mut Context,
     slave: u16,
     active: bool,
@@ -181,7 +181,7 @@ pub fn dsync0(
 ///
 /// # Returns
 /// `Ok(())` or `NicdrvError`
-pub fn dsync01(
+pub fn dcsync01(
     context: &mut Context,
     slave: u16,
     active: bool,

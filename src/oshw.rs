@@ -4,7 +4,7 @@ use num_traits::PrimInt;
 
 pub mod nicdrv;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Network<Int: PrimInt>(Int);
 
 impl<Int: PrimInt> Network<Int> {
@@ -36,3 +36,23 @@ impl<Int: PrimInt> Network<Int> {
         }
     }
 }
+
+macro_rules! ethercat_bytes {
+    ($data_type: ident) => {
+        impl Network<$data_type> {
+            pub const fn to_bytes(self) -> [u8; size_of::<$data_type>()] {
+                self.0.to_ne_bytes()
+            }
+
+            pub const fn from_bytes(bytes: [u8; size_of::<$data_type>()]) -> Self {
+                Self::from_raw($data_type::from_ne_bytes(bytes))
+            }
+        }
+    };
+}
+
+ethercat_bytes!(u16);
+ethercat_bytes!(u32);
+ethercat_bytes!(i32);
+ethercat_bytes!(i64);
+ethercat_bytes!(u64);

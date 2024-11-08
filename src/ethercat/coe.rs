@@ -19,6 +19,8 @@ use crate::ethercat::r#type::{
     SDO_PDO_ASSIGNMENT, SDO_SMCOMMTYPE, TIMEOUT_TX_MAILBOX,
 };
 
+use super::main::PdoAssign;
+use super::main::PdoDescription;
 use super::main::{
     Context, InvalidSyncManagerType, MailboxHeader, MailboxIn, MailboxOut,
     MainError as MailboxError, PacketError, SyncManagerCommunicationType, MAX_NAME_LENGTH,
@@ -28,6 +30,7 @@ use super::r#type::{
     TIMEOUT_RX_MAILBOX,
 };
 use super::ReadFrom;
+use super::WriteTo;
 
 /// Invalid Service Data Object size
 #[derive(Debug)]
@@ -109,7 +112,6 @@ impl From<Utf8Error> for CoEError {
 }
 
 /// Variants for easy data access
-
 #[expect(dead_code)]
 #[derive(Debug)]
 enum ServiceData {
@@ -125,6 +127,10 @@ impl Default for ServiceData {
 }
 
 impl ServiceData {
+    pub const fn size() -> usize {
+        size_of::<[u8; 200]>()
+    }
+
     pub fn as_bytes(&self) -> &[u8; 512] {
         match self {
             ServiceData::Byte(bytes) => bytes,
@@ -223,16 +229,19 @@ impl<R: Read> ReadFrom<R> for ServiceDataObject {
     }
 }
 
-impl ServiceDataObject {
-    pub fn write_to(&self, bytes: &mut impl Write) -> io::Result<()> {
-        self.mailbox_header.write_to(bytes)?;
-        bytes.write_all(&self.can_open.to_bytes())?;
-        bytes.write_all(&[self.command])?;
-        bytes.write_all(&self.index.to_bytes())?;
-        bytes.write_all(&[self.sub_index])?;
-        bytes.write_all(self.data.as_bytes())
+impl<W: Write> WriteTo<W> for ServiceDataObject {
+    fn write_to(&self, writer: &mut W) -> io::Result<()> {
+        self.mailbox_header.write_to(writer)?;
+        writer.write_all(&self.can_open.to_bytes())?;
+        writer.write_all(&[self.command])?;
+        writer.write_all(&self.index.to_bytes())?;
+        writer.write_all(&[self.sub_index])?;
+        writer.write_all(self.data.as_bytes())?;
+        Ok(())
     }
+}
 
+impl ServiceDataObject {
     pub fn read_from_index<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         self.index = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
         self.sub_index = Self::read_byte(reader)?;
@@ -309,13 +318,29 @@ impl<R: Read> ReadFrom<R> for ServiceDataObjectService {
     }
 }
 
-impl ServiceDataObjectService {
-    pub fn write_to<W: Write>(&self, bytes: &mut W) -> io::Result<()> {
+impl<W: Write> WriteTo<W> for ServiceDataObjectService {
+    fn write_to(&self, bytes: &mut W) -> io::Result<()> {
         self.mailbox_header.write_to(bytes)?;
         bytes.write_all(&self.can_open.to_bytes())?;
         bytes.write_all(&[u8::from(self.opcode), self.reserved])?;
         bytes.write_all(&self.fragments.to_bytes())?;
         bytes.write_all(self.data.as_bytes())
+    }
+}
+
+impl ServiceDataObjectService {
+    pub const fn size() -> usize {
+        MailboxHeader::size()
+            + 2 * size_of::<u16>()
+            + COEObjectDescriptionCommand::size()
+            + size_of::<u8>()
+            + ServiceData::size()
+    }
+
+    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+        let mut result = [0; Self::size()];
+        self.write_to(&mut result.as_mut_slice())?;
+        Ok(result)
     }
 }
 
@@ -1139,8 +1164,7 @@ fn read_pdo_assign_complete_access(
     pdo_assign: u16,
 ) -> Result<u32, CoEError> {
     // Find maximum size of PDOassign buffer
-    let mut pdo_assign_copy = context.get_pdo_assign(thread_number);
-    *pdo_assign_copy.number_mut() = 0;
+    let mut pdo_assign_bytes = [0; PdoAssign::size()];
 
     // Read rxPDOassign in complete access mode, all subindexes areread in one struct
     sdo_read(
@@ -1149,47 +1173,47 @@ fn read_pdo_assign_complete_access(
         pdo_assign,
         0,
         true,
-        <&mut [u8]>::from(&mut pdo_assign_copy),
+        <&mut [u8]>::from(&mut pdo_assign_bytes),
         TIMEOUT_RX_MAILBOX,
     )?;
 
-    if pdo_assign_copy.number() == 0 {
+    let pdo_assign = PdoAssign::read_from(&mut pdo_assign_bytes.as_slice())?;
+    if pdo_assign.number() == 0 {
         return Ok(0);
     }
 
-    let bit_length = pdo_assign_copy
+    let bit_length = pdo_assign
         .index()
         .iter()
         .copied()
-        .map(Ethercat::from_raw)
         .map(Ethercat::to_host)
         .filter(|index| *index > 0)
         .map(|index| {
-            let mut pdo_description = context.get_pdo_description(thread_number);
-            *pdo_description.number_mut() = 0;
+            let mut pdo_description = [0; PdoDescription::size()];
             sdo_read(
                 context,
                 slave,
                 index,
                 0,
                 true,
-                <&mut [u8]>::from(&mut pdo_description),
+                &mut pdo_description,
                 TIMEOUT_RX_MAILBOX,
             )?;
+            let pdo_description = PdoDescription::read_from(&mut pdo_description.as_slice())?;
 
             // Extract all bitlengths of SDO'
             let bit_length = pdo_description
                 .pdo()
                 .iter()
                 .copied()
-                .map(|long| u32::from(low_byte(Ethercat::from_raw(long).to_host() as u16)))
+                .map(|long| u32::from(low_byte(long.to_host() as u16)))
                 .sum::<u32>();
 
             *context.get_pdo_description_mut(thread_number) = pdo_description;
             Ok(bit_length)
         })
         .sum::<Result<u32, CoEError>>()?;
-    *context.get_pdo_assign_mut(thread_number) = pdo_assign_copy;
+    *context.get_pdo_assign_mut(thread_number) = pdo_assign;
 
     Ok(bit_length)
 }

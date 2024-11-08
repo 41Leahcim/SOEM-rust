@@ -7,45 +7,20 @@
 //! increasing. For fast systems running Xenomai and RT-net or alike the
 //! timeouts need to be shorter.
 
-use std::{array, time::Duration};
+use std::{
+    array,
+    io::{self, Read, Write},
+    time::Duration,
+};
 
-use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use num_traits::PrimInt;
 
 use crate::oshw::Network;
 
-use super::main::{MainError, PacketError};
-
-/// Possible error codes returned
-#[derive(Debug)]
-pub enum Error {
-    /// No frame returned
-    NoFrame = -1,
-
-    /// Unknown frame received
-    OtherFramce = -2,
-
-    /// General error
-    Error = -3,
-
-    /// Too many slaves
-    SlaveCountExceeded = -4,
-
-    /// Request timeout
-    Timeout = -5,
-
-    /// Library already initialized
-    AlreadyInitialized = 0,
-
-    /// Library not initialized
-    NotInitialized,
-
-    /// No slaves were found
-    NoSlaves,
-
-    /// Function failed
-    FunctionFailed,
-}
+use super::{
+    main::{MainError, PacketError},
+    ReadFrom, WriteTo,
+};
 
 /// Maximum EtherCAT frame length in bytes
 pub const MAX_ECAT_FRAME_LENGTH: usize = 1518;
@@ -56,7 +31,7 @@ const FCS_SIZE: usize = 4;
 
 /// Maximum EtherCAT LRW frame length in bytes
 pub const MAX_LRW_DATA_LENGTH: usize = MAX_ECAT_FRAME_LENGTH
-    - ETHERNET_HEADER_SIZE
+    - EthernetHeader::size()
     - DATA_SIZE
     - DATAGRAM_HEADER_SIZE
     - ETHERCAT_WORK_COUNTER_SIZE
@@ -66,25 +41,25 @@ pub const MAX_LRW_DATA_LENGTH: usize = MAX_ECAT_FRAME_LENGTH
 pub const FIRST_DC_DATAGRAM_SIZE: usize = 20;
 
 /// Standard frame buffer size in bytes
-pub const BUFSIZE: usize = MAX_ECAT_FRAME_LENGTH;
+pub const BUFFER_SIZE: usize = MAX_ECAT_FRAME_LENGTH;
 
 /// Datagram type EtherCAT
 pub const ECATTYPE: u16 = 0x1000;
 
 /// Number of frame buffers per channel
-pub const MAX_BUF_COUNT: usize = 16;
+pub const MAX_BUFFER_COUNT: usize = 16;
 
 /// Timeout value for tx frame to return to rx
 pub const TIMEOUT_RETURN: Duration = Duration::from_micros(2000);
 
 /// Timeout value for safe data transfer, max. triple retry
-pub const TIMEOUT_RET3: Duration = Duration::from_micros(2000 * 3);
+pub const TIMEOUT_RETURN3: Duration = Duration::from_micros(2000 * 3);
 
 /// Timeout value for return "safe" variant (f.e. wireless)
 pub const TIMEOUT_SAFE: Duration = Duration::from_micros(20_000);
 
 /// Timeout value for EEPROM access
-pub const TIMEOUT_EEP: Duration = Duration::from_micros(20_000);
+pub const TIMEOUT_EEPROM: Duration = Duration::from_micros(20_000);
 
 /// Timeout value for tx mailbox cycle
 pub const TIMEOUT_TX_MAILBOX: Duration = Duration::from_micros(20_000);
@@ -96,10 +71,10 @@ pub const TIMEOUT_RX_MAILBOX: Duration = Duration::from_micros(700_000);
 pub const TIMEOUT_STATE: Duration = Duration::from_micros(2_000_000);
 
 /// Size of EEPROM bitmap cache
-pub const MAX_EEP_BITMAP_SIZE: u16 = 128;
+pub const MAX_EEPROM_BITMAP_SIZE: u16 = 128;
 
 /// Size of EEPROM cache buffer
-pub const MAX_EEP_BUF_SIZE: u16 = MAX_EEP_BITMAP_SIZE << 5;
+pub const MAX_EEPROM_BUFFER_SIZE: u16 = MAX_EEPROM_BITMAP_SIZE << 5;
 
 /// Default number of retries if WKC <= 0
 pub const DEFAULT_RETRIES: u8 = 3;
@@ -107,12 +82,7 @@ pub const DEFAULT_RETRIES: u8 = 3;
 /// Default group size in 2^x
 pub const LOG_GROUP_OFFSET: u8 = 16;
 
-pub type Buffer = heapless::Vec<u8, BUFSIZE>;
-
-#[derive(Debug)]
-pub enum EthernetHeaderError {
-    WrongSize,
-}
+pub type Buffer = heapless::Vec<u8, BUFFER_SIZE>;
 
 /// Ethernet header defenition
 #[derive(Debug, Clone, Copy)]
@@ -150,21 +120,35 @@ impl EthernetHeader {
     pub const fn ethernet_type(&self) -> Network<u16> {
         self.etype
     }
+
+    pub const fn size() -> usize {
+        size_of::<u16>() * 7
+    }
+
+    /// # Errors
+    /// Returns an error if the Ethernetheader couldn't be converted to bytes.
+    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+        let mut result = [0; Self::size()];
+        self.write_to(&mut result.as_mut_slice())?;
+        Ok(result)
+    }
 }
 
-impl TryFrom<&[u8]> for EthernetHeader {
-    type Error = EthernetHeaderError;
+impl<R: Read> ReadFrom<R> for EthernetHeader {
+    type Err = io::Error;
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            return Err(EthernetHeaderError::WrongSize);
-        }
-        let mut words = value
-            .chunks(2)
-            .map(|chunk| u16::from_le_bytes(array::from_fn(|i| chunk[i])));
-        let destination_address = array::from_fn(|_| Network::from_raw(words.next().unwrap()));
-        let source_address = array::from_fn(|_| Network::from_raw(words.next().unwrap()));
-        let etype = Network::from_raw(words.next().unwrap());
+    fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
+        let destination_address = (0..3).try_fold([Network::default(); 3], |result, index| {
+            let mut result = result;
+            result[index] = Network::<u16>::from_bytes(Self::read_bytes(reader)?);
+            Ok::<_, io::Error>(result)
+        })?;
+        let source_address = (0..3).try_fold([Network::default(); 3], |result, index| {
+            let mut result = result;
+            result[index] = Network::<u16>::from_bytes(Self::read_bytes(reader)?);
+            Ok::<_, io::Error>(result)
+        })?;
+        let etype = Network::<u16>::from_bytes(Self::read_bytes(reader)?);
         Ok(Self {
             destination_address,
             source_address,
@@ -173,39 +157,34 @@ impl TryFrom<&[u8]> for EthernetHeader {
     }
 }
 
-#[expect(unsafe_code)]
-unsafe impl NoUninit for EthernetHeader {}
-
-impl AsRef<[u8]> for EthernetHeader {
-    fn as_ref(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
+impl<W: Write> WriteTo<W> for EthernetHeader {
+    fn write_to(&self, writer: &mut W) -> io::Result<()> {
+        [
+            self.destination_address.as_slice(),
+            self.source_address.as_slice(),
+            [self.etype].as_slice(),
+        ]
+        .into_iter()
+        .flatten()
+        .try_fold((), |(), word| writer.write_all(&word.to_bytes()))
     }
 }
-
-#[expect(unsafe_code)]
-unsafe impl Zeroable for EthernetHeader {}
-
-#[expect(unsafe_code)]
-unsafe impl AnyBitPattern for EthernetHeader {}
-
-impl AsMut<[u8]> for EthernetHeader {
-    fn as_mut(&mut self) -> &mut [u8] {
-        bytemuck::bytes_of_mut(self)
-    }
-}
-
-/// Ethernet header size
-pub const ETHERNET_HEADER_SIZE: usize = size_of::<EthernetHeader>();
 
 #[derive(Debug)]
 pub enum EthercatHeaderError {
-    WrongSize(usize),
-    InvalidCommandType(InvalidCommand),
+    Io(io::Error),
+    InvalidCommand(InvalidCommand),
+}
+
+impl From<io::Error> for EthercatHeaderError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
 }
 
 impl From<InvalidCommand> for EthercatHeaderError {
     fn from(value: InvalidCommand) -> Self {
-        Self::InvalidCommandType(value)
+        Self::InvalidCommand(value)
     }
 }
 
@@ -229,10 +208,57 @@ pub struct EthercatHeader {
     data_length: Ethercat<u16>,
 
     /// Interrupt, currently unused
-    interrupt: u16,
+    interrupt: Ethercat<u16>,
+}
+
+impl<R: Read> ReadFrom<R> for EthercatHeader {
+    type Err = EthercatHeaderError;
+
+    fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
+        let ethercat_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let command = Command::try_from(Self::read_byte(reader)?)?;
+        let index = Self::read_byte(reader)?;
+        let address_position = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let address_offset = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let data_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let interrupt = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        Ok(Self {
+            ethercat_length,
+            command,
+            index,
+            address_position,
+            address_offset,
+            data_length,
+            interrupt,
+        })
+    }
+}
+
+impl<W: Write> WriteTo<W> for EthercatHeader {
+    fn write_to(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&self.ethercat_length.to_bytes())?;
+        writer.write_all(&[u8::from(self.command), self.index])?;
+        writer.write_all(&self.address_position.to_bytes())?;
+        writer.write_all(&self.address_offset.to_bytes())?;
+        writer.write_all(&self.data_length.to_bytes())?;
+        writer.write_all(&self.interrupt.to_bytes())?;
+        Ok(())
+    }
 }
 
 impl EthercatHeader {
+    pub const fn size() -> usize {
+        5 * size_of::<u16>() + 2 * size_of::<u8>()
+    }
+
+    /// # Errors
+    /// Returns an error if the EtherCAT header couldn't be converted to bytes.
+    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+        let mut result = [0; Self::size()];
+        self.write_to(&mut result.as_mut_slice())?;
+        Ok(result)
+    }
+
     pub const fn new(
         ethercat_length: Ethercat<u16>,
         command: Command,
@@ -240,7 +266,7 @@ impl EthercatHeader {
         address_position: Ethercat<u16>,
         address_offset: Ethercat<u16>,
         data_length: Ethercat<u16>,
-        interrupt: u16,
+        interrupt: Ethercat<u16>,
     ) -> Self {
         Self {
             ethercat_length,
@@ -289,40 +315,6 @@ impl EthercatHeader {
         &mut self.address_offset
     }
 }
-
-impl TryFrom<&[u8]> for EthercatHeader {
-    type Error = EthercatHeaderError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < size_of::<Self>() {
-            return Err(EthercatHeaderError::WrongSize(value.len()));
-        }
-        let command = Command::try_from(value[2])?;
-        Ok(Self {
-            ethercat_length: Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap())),
-            command,
-            index: value[3],
-            address_position: Ethercat::from_raw(u16::from_ne_bytes(
-                value[4..6].try_into().unwrap(),
-            )),
-            address_offset: Ethercat::from_raw(u16::from_ne_bytes(value[6..8].try_into().unwrap())),
-            data_length: Ethercat::from_raw(u16::from_ne_bytes(value[8..10].try_into().unwrap())),
-            interrupt: u16::from_ne_bytes(value[10..12].try_into().unwrap()),
-        })
-    }
-}
-
-#[expect(unsafe_code)]
-unsafe impl NoUninit for EthercatHeader {}
-
-impl AsRef<[u8]> for EthercatHeader {
-    fn as_ref(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-    }
-}
-
-/// EtherCAT header size
-pub const ETHERCAT_HEADER_SIZE: usize = size_of::<EthercatHeader>();
 
 /// Size of `EthercatHeader.ethercat_length`
 pub const ETHERCAT_LENGTH_SIZE: usize = size_of::<u16>();
@@ -621,6 +613,15 @@ impl TryFrom<u8> for Command {
             Ok(command.into())
         } else {
             Err(InvalidCommand(value))
+        }
+    }
+}
+
+impl From<Command> for u8 {
+    fn from(value: Command) -> Self {
+        match value {
+            Command::ReadCommand(read_command) => u8::from(read_command),
+            Command::WriteCommand(write_command) => u8::from(write_command),
         }
     }
 }
@@ -931,6 +932,10 @@ impl TryFrom<u8> for COEObjectDescriptionCommand {
 }
 
 impl COEObjectDescriptionCommand {
+    pub const fn size() -> usize {
+        size_of::<u8>()
+    }
+
     pub fn is_valid(&self) -> bool {
         (1..=7).contains(&(*self as u8))
     }
@@ -1143,10 +1148,10 @@ pub const SDO_SMCOMMTYPE: u16 = 0x1C00;
 pub const SDO_PDO_ASSIGNMENT: u16 = 0x1C10;
 
 /// Service Data Object - received Process Data Object assignment
-pub const SDO_RX_PDO_ASSIGN: u16 = 0x1C12;
+pub const SDO_RX_PDO_ASSIGNMENT: u16 = 0x1C12;
 
 /// Service Data Object - Send Process Data Object assignment
-pub const SDO_TX_PDO_ASSIGN: u16 = 0x1C13;
+pub const SDO_TX_PDO_ASSIGNMENT: u16 = 0x1C13;
 
 /// Ethercat packet type
 pub const ETH_P_ECAT: u16 = 0x88A4;
@@ -1220,10 +1225,6 @@ pub const fn high_word(dword: u32) -> u16 {
 /// This struct makes it harder or even impossible to perform some operations on values
 /// converted to EtherCAT.
 pub struct Ethercat<Int: PrimInt>(Int);
-
-unsafe impl<Int: PrimInt> Zeroable for Ethercat<Int> {}
-
-unsafe impl<Int: PrimInt + 'static> Pod for Ethercat<Int> {}
 
 impl<Int: PrimInt> Ethercat<Int> {
     pub const fn from_raw(value: Int) -> Self {

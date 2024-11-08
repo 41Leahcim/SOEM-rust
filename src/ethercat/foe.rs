@@ -19,7 +19,7 @@ use crate::ethercat::{
 use super::{
     main::{Context, MailboxHeader, MainError},
     r#type::{Ethercat, InvalidFOEOpcode},
-    ReadFrom,
+    ReadFrom, WriteTo,
 };
 
 const MAX_FOE_DATA: usize = 512;
@@ -133,8 +133,8 @@ impl<R: Read> ReadFrom<R> for FileOverEthercat {
     }
 }
 
-impl FileOverEthercat {
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+impl<W: Write> WriteTo<W> for FileOverEthercat {
+    fn write_to(&self, writer: &mut W) -> io::Result<()> {
         self.mailbox_header.write_to(writer)?;
         writer.write_all(&[u8::from(self.opcode), self.reserved])?;
         writer.write_all(&self.packet_info.inner().to_bytes())?;
@@ -164,7 +164,7 @@ impl FileOverEthercat {
 /// # Returns
 /// `Ok(())` or Error
 #[expect(clippy::missing_panics_doc)]
-pub fn foe_read(
+pub fn read(
     context: &mut Context,
     slave: u16,
     mut file_name: &str,
@@ -287,7 +287,7 @@ pub fn foe_read(
 ///
 /// # Returns
 /// `Ok(())` or error
-pub fn foe_write(
+pub fn write(
     context: &mut Context,
     slave: u16,
     mut file_name: &str,

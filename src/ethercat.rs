@@ -12,7 +12,7 @@ pub mod main;
 pub mod soe;
 pub mod r#type;
 
-trait ReadFrom<R: Read> {
+pub trait ReadFrom<R: Read>: Sized {
     type Err;
 
     /// # Errors
@@ -36,4 +36,8 @@ trait ReadFrom<R: Read> {
     fn read_byte(reader: &mut R) -> io::Result<u8> {
         Ok(Self::read_bytes::<1>(reader)?[0])
     }
+}
+
+trait WriteTo<W> {
+    fn write_to(&self, writer: &mut W) -> io::Result<()>;
 }

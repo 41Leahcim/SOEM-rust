@@ -5,8 +5,6 @@ use std::{
     time::Duration,
 };
 
-use bytemuck::{AnyBitPattern, NoUninit, Zeroable};
-
 use crate::{
     ethercat::{
         main::{MailboxOut, PacketError},
@@ -18,30 +16,30 @@ use crate::{
 use super::{
     main::{Context, MailboxHeader, MailboxIn, MainError},
     r#type::{Ethercat, InvalidServoOverEthercatOpcode, TIMEOUT_RX_MAILBOX},
-    ReadFrom,
+    ReadFrom, WriteTo,
 };
 
-const DATASTATE_B: u8 = 0x01;
-const NAME_B: u8 = 0x02;
-const ATTRIBUTE_B: u8 = 0x04;
-const UNIT_B: u8 = 0x08;
-const MIN_B: u8 = 0x10;
-const MAX_B: u8 = 0x20;
-const VALUE_B: u8 = 0x40;
-const DEFAULT_B: u8 = 0x80;
+pub const DATASTATE_BIT: u8 = 0x01;
+pub const NAME_BIT: u8 = 0x02;
+pub const ATTRIBUTE_BIT: u8 = 0x04;
+pub const UNIT_BIT: u8 = 0x08;
+pub const MIN_BIT: u8 = 0x10;
+pub const MAX_BIT: u8 = 0x20;
+pub const VALUE_BIT: u8 = 0x40;
+pub const DEFAULT_BIT: u8 = 0x80;
 
-const MAX_NAME_LENGTH: usize = 60;
-const MAX_MAPPING_LENGTH: usize = 64;
+pub const MAX_NAME_LENGTH: usize = 60;
+pub const MAX_MAPPING_LENGTH: usize = 64;
 
-const IDN_MDT_CONFIG: u8 = 24;
-const IDN_AT_CONFIG: u8 = 16;
+pub const IDN_MDT_CONFIG: u8 = 24;
+pub const IDN_AT_CONFIG: u8 = 16;
 
-const LENGTH1: u8 = 0;
-const LENGTH2: u8 = 1;
-const LENGTH4: u8 = 2;
-const LENGTH8: u8 = 3;
+pub const LENGTH1: u8 = 0;
+pub const LENGTH2: u8 = 1;
+pub const LENGTH4: u8 = 2;
+pub const LENGTH8: u8 = 3;
 
-const SOE_MAX_DRIVES: u8 = 8;
+const MAX_DRIVES: u8 = 8;
 
 pub enum ServoOverEthercatError {
     Main(MainError),
@@ -79,37 +77,37 @@ impl From<InvalidServoOverEthercatOpcode> for ServoOverEthercatError {
 }
 
 /// SoE name
-struct SoEName {
+pub struct Name {
     /// Current length in bytes of list
     current_length: u16,
 
     /// Maximum length in bytes of list
     max_length: u16,
 
-    name: heapless::String<MAX_NAME_LENGTH>,
+    value: heapless::String<MAX_NAME_LENGTH>,
 }
 
-/// SoE list
-enum SoEListValue {
+pub enum ListValue {
     Byte([u8; 8]),
     Word([u16; 4]),
     Dword([u32; 2]),
     Lword(u64),
 }
 
-struct SoEList {
+/// SoE list
+pub struct List {
     /// Current length in bytes of list
     current_length: u16,
 
     /// Maximum length in bytes of list
     max_length: u16,
 
-    data: SoEListValue,
+    data: ListValue,
 }
 
 /// SoE IDN mapping
 #[derive(Debug, Clone, Copy)]
-struct SoeMapping {
+pub struct Mapping {
     /// Current length in bytes of list
     current_length: Ethercat<u16>,
 
@@ -119,7 +117,13 @@ struct SoeMapping {
     idn: [Ethercat<u16>; MAX_MAPPING_LENGTH],
 }
 
-impl Default for SoeMapping {
+impl Mapping {
+    pub const fn size() -> usize {
+        size_of::<u16>() * (2 + MAX_MAPPING_LENGTH)
+    }
+}
+
+impl Default for Mapping {
     fn default() -> Self {
         Self {
             current_length: Ethercat::default(),
@@ -129,14 +133,25 @@ impl Default for SoeMapping {
     }
 }
 
-unsafe impl NoUninit for SoeMapping {}
+impl<R: Read> ReadFrom<R> for Mapping {
+    type Err = io::Error;
 
-unsafe impl Zeroable for SoeMapping {}
-unsafe impl AnyBitPattern for SoeMapping {}
-
-impl SoeMapping {
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        bytemuck::bytes_of_mut(self)
+    fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
+        let current_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let max_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let idn = (0..MAX_MAPPING_LENGTH).try_fold(
+            [Ethercat::default(); MAX_MAPPING_LENGTH],
+            |result, index| {
+                let mut result = result;
+                result[index] = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+                Ok::<_, io::Error>(result)
+            },
+        )?;
+        Ok(Self {
+            current_length,
+            max_length,
+            idn,
+        })
     }
 }
 
@@ -201,7 +216,7 @@ impl IdnType {
     }
 }
 
-struct SoeAttribute {
+struct Attribute {
     /// Evaluation factor for display purposes (16-bit)
     eval_factor: Ethercat<u16>,
 
@@ -232,7 +247,7 @@ struct SoeAttribute {
     reserved2: (),
 }
 
-impl<R: Read> ReadFrom<R> for SoeAttribute {
+impl<R: Read> ReadFrom<R> for Attribute {
     type Err = ServoOverEthercatError;
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
@@ -260,7 +275,7 @@ impl<R: Read> ReadFrom<R> for SoeAttribute {
     }
 }
 
-impl SoeAttribute {
+impl Attribute {
     pub const fn size() -> usize {
         size_of::<Ethercat<u32>>()
     }
@@ -341,8 +356,10 @@ impl ServoOverEthercat {
     const fn size() -> usize {
         MailboxHeader::size() + 5 * size_of::<u8>() + size_of::<u16>()
     }
+}
 
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+impl<W: Write> WriteTo<W> for ServoOverEthercat {
+    fn write_to(&self, writer: &mut W) -> io::Result<()> {
         self.mailbox_header.write_to(writer)?;
         writer.write_all(&[
             u8::from(self.opcode)
@@ -382,7 +399,7 @@ impl ServoOverEthercat {
 ///
 /// # Returns
 /// Bytes read or `Error`
-pub fn soe_read(
+pub fn read(
     context: &mut Context,
     slave: u16,
     drive_number: u8,
@@ -513,7 +530,7 @@ pub fn soe_read(
 ///
 /// # Returns
 /// `Ok(())` or error
-pub fn soe_write(
+pub fn write(
     context: &mut Context,
     slave: u16,
     drive_number: u8,
@@ -630,6 +647,9 @@ pub fn soe_write(
 /// `output_size`: Size in bits of output mapping (MTD) found
 /// `input_size`: Size in bits of input mapping (AT) found
 ///
+/// # Errors
+/// Returns an error if the mapping couldn't be read from received bytes.
+///
 /// # Returns
 /// whether any IO was found
 pub fn read_id_nmap(
@@ -637,34 +657,35 @@ pub fn read_id_nmap(
     slave: u16,
     output_size: &mut u32,
     input_size: &mut u32,
-) -> bool {
+) -> io::Result<bool> {
     *input_size = 0;
     *output_size = 0;
-    for drive_number in 0..SOE_MAX_DRIVES {
+    for drive_number in 0..MAX_DRIVES {
         // Read output mapping via Servo over Ethercat
-        let mut soe_mapping = SoeMapping::default();
-        if soe_read(
+        let mut mapping_bytes = [0; Mapping::size()];
+        if read(
             context,
             slave,
             drive_number,
-            VALUE_B,
+            VALUE_BIT,
             Ethercat::from_host(u16::from(IDN_MDT_CONFIG)),
-            soe_mapping.as_bytes_mut(),
+            &mut mapping_bytes,
             TIMEOUT_RX_MAILBOX,
         )
         .is_ok_and(|bytes_read| bytes_read >= 4)
         {
+            let soe_mapping = Mapping::read_from(&mut mapping_bytes.as_slice())?;
             let entries = soe_mapping.current_length.to_host() / 2;
             if (1..=MAX_MAPPING_LENGTH).contains(&usize::from(entries)) {
                 // Command word (u16) is always mapped but not in list
                 *output_size += 16;
                 for item_count in 0..entries {
-                    let mut bytes = [0; SoeAttribute::size()];
-                    if soe_read(
+                    let mut bytes = [0; Attribute::size()];
+                    if read(
                         context,
                         slave,
                         drive_number,
-                        ATTRIBUTE_B,
+                        ATTRIBUTE_BIT,
                         soe_mapping.idn[usize::from(item_count)],
                         &mut bytes,
                         TIMEOUT_RX_MAILBOX,
@@ -673,7 +694,7 @@ pub fn read_id_nmap(
                     {
                         continue;
                     }
-                    let Some(soe_attribute) = SoeAttribute::read_from(&mut bytes.as_slice())
+                    let Some(soe_attribute) = Attribute::read_from(&mut bytes.as_slice())
                         .ok()
                         .filter(|soe_attribute| !soe_attribute.idn_type.is_list())
                     else {
@@ -684,28 +705,29 @@ pub fn read_id_nmap(
             }
         }
 
-        if soe_read(
+        if read(
             context,
             slave,
             drive_number,
-            VALUE_B,
+            VALUE_BIT,
             Ethercat::from_host(u16::from(IDN_AT_CONFIG)),
-            soe_mapping.as_bytes_mut(),
+            &mut mapping_bytes,
             TIMEOUT_RX_MAILBOX,
         )
         .is_ok_and(|read_size| read_size >= 4)
         {
+            let soe_mapping = Mapping::read_from(&mut mapping_bytes.as_slice())?;
             let entries = soe_mapping.current_length.to_host() / 2;
             if (1..=MAX_MAPPING_LENGTH).contains(&usize::from(entries)) {
                 // Status word (u16) is always mapped but not in list
                 *input_size += 16;
                 for item_count in 0..entries {
-                    let mut bytes = [0; SoeAttribute::size()];
-                    if soe_read(
+                    let mut bytes = [0; Attribute::size()];
+                    if read(
                         context,
                         slave,
                         drive_number,
-                        ATTRIBUTE_B,
+                        ATTRIBUTE_BIT,
                         soe_mapping.idn[usize::from(item_count)],
                         &mut bytes,
                         TIMEOUT_RX_MAILBOX,
@@ -714,7 +736,7 @@ pub fn read_id_nmap(
                     {
                         continue;
                     }
-                    let Ok(soe_attribute) = SoeAttribute::read_from(&mut bytes.as_slice()) else {
+                    let Ok(soe_attribute) = Attribute::read_from(&mut bytes.as_slice()) else {
                         continue;
                     };
                     *input_size += 8 << soe_attribute.length;
@@ -722,5 +744,5 @@ pub fn read_id_nmap(
             }
         }
     }
-    *input_size != 0 && *output_size != 0
+    Ok(*input_size != 0 && *output_size != 0)
 }

@@ -23,7 +23,7 @@
 //! This layer is fully transparent from the highest layers.
 
 use std::{
-    array,
+    array, io,
     mem::zeroed,
     ptr::{self, NonNull},
     sync::{
@@ -34,10 +34,12 @@ use std::{
 };
 
 use crate::{
-    ethercat::r#type::{
-        Buffer, BufferState, Error as EthercatError, EthercatHeader, EthercatHeaderError,
-        EthernetHeader, EthernetHeaderError, ETHERNET_HEADER_SIZE, ETH_P_ECAT, MAX_BUF_COUNT,
-        TIMEOUT_RETURN,
+    ethercat::{
+        r#type::{
+            Buffer, BufferState, EthercatHeader, EthercatHeaderError, EthernetHeader, ETH_P_ECAT,
+            MAX_BUFFER_COUNT, TIMEOUT_RETURN,
+        },
+        ReadFrom,
     },
     osal::OsalTimer,
     safe_c::{CError, CloseError},
@@ -48,21 +50,16 @@ use super::Network;
 #[derive(Debug)]
 pub enum NicdrvError {
     C(CError),
-    MissingRedportInSecondaryNicSetup,
-    EthernetHeaderError(EthernetHeaderError),
     EthercatHeaderError(EthercatHeaderError),
-    EthercatError(EthercatError),
+    Io(io::Error),
+    MissingRedportInSecondaryNicSetup,
+    NoFrame,
+    OtherFrame,
 }
 
 impl From<CError> for NicdrvError {
     fn from(value: CError) -> Self {
         Self::C(value)
-    }
-}
-
-impl From<EthernetHeaderError> for NicdrvError {
-    fn from(value: EthernetHeaderError) -> Self {
-        Self::EthernetHeaderError(value)
     }
 }
 
@@ -72,9 +69,9 @@ impl From<EthercatHeaderError> for NicdrvError {
     }
 }
 
-impl From<EthercatError> for NicdrvError {
-    fn from(value: EthercatError) -> Self {
-        Self::EthercatError(value)
+impl From<io::Error> for NicdrvError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
     }
 }
 
@@ -115,19 +112,19 @@ pub struct Stack<'stack> {
     socket: Arc<AtomicI32>,
 
     /// Send buffers
-    tx_buffer: Arc<Mutex<[Buffer; MAX_BUF_COUNT]>>,
+    tx_buffer: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
 
     /// Temporary receive buffer
     temp_buf: &'stack Mutex<Buffer>,
 
     /// Rreceive buffers
-    rx_buffers: Arc<Mutex<[Buffer; MAX_BUF_COUNT]>>,
+    rx_buffers: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
 
     /// Receive buffer status fields
-    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUF_COUNT]>>,
+    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUFFER_COUNT]>>,
 
     /// Received MAC source address (middle word)
-    rx_source_address: Arc<Mutex<[i32; MAX_BUF_COUNT]>>,
+    rx_source_address: Arc<Mutex<[i32; MAX_BUFFER_COUNT]>>,
 }
 
 /// EtherCAT eXtended Pointer structure to buffers for redundant port
@@ -136,13 +133,13 @@ pub struct RedPort<'redport> {
     sockhandle: Arc<AtomicI32>,
 
     /// Receive buffers
-    rx_buf: Arc<Mutex<[Buffer; MAX_BUF_COUNT]>>,
+    rx_buf: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
 
     /// Receive buffer status
-    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUF_COUNT]>>,
+    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUFFER_COUNT]>>,
 
     /// Receive MAC source address
-    rx_source_address: Arc<Mutex<[i32; MAX_BUF_COUNT]>>,
+    rx_source_address: Arc<Mutex<[i32; MAX_BUFFER_COUNT]>>,
 
     temp_in_buf: &'redport Mutex<Buffer>,
 }
@@ -153,13 +150,13 @@ pub struct Port<'port> {
     sockhandle: Arc<AtomicI32>,
 
     /// Rx buffers
-    rx_buffers: Arc<Mutex<[Buffer; MAX_BUF_COUNT]>>,
+    rx_buffers: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
 
     /// Receive buffer status
-    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUF_COUNT]>>,
+    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUFFER_COUNT]>>,
 
     /// Receive MAC source address
-    rx_source_address: Arc<Mutex<[i32; MAX_BUF_COUNT]>>,
+    rx_source_address: Arc<Mutex<[i32; MAX_BUFFER_COUNT]>>,
 
     /// Temporary receive buffer
     temp_in_buf: &'port Mutex<Buffer>,
@@ -168,7 +165,7 @@ pub struct Port<'port> {
     temp_in_buf_stat: BufferState,
 
     /// Transmit buffers
-    tx_buffers: Arc<Mutex<[Buffer; MAX_BUF_COUNT]>>,
+    tx_buffers: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
 
     /// Temporary send buffer
     temp_tx_buffer: &'port Mutex<Buffer>,
@@ -185,13 +182,13 @@ pub struct Port<'port> {
 impl<'port> Port<'port> {
     /// # Panics
     /// Will panic if the `tx_buffers` mutex is poisoned.
-    pub fn tx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUF_COUNT]> {
+    pub fn tx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUFFER_COUNT]> {
         self.tx_buffers.lock().unwrap()
     }
 
     /// # Panics
     /// Will panic if the `rx_buffers` mutex is poisoned.
-    pub fn rx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUF_COUNT]> {
+    pub fn rx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUFFER_COUNT]> {
         self.rx_buffers.lock().unwrap()
     }
 
@@ -260,12 +257,12 @@ impl<'port> Port<'port> {
             .zip(self.rx_buf_stat.lock().unwrap().iter_mut())
         {
             tx_buf.clear();
-            tx_buf.extend_from_slice(header.as_ref()).unwrap();
+            tx_buf.extend_from_slice(&header.bytes()?).unwrap();
             *rx_buf_stat = BufferState::Empty;
         }
         let mut temp_tx_buffer = self.temp_tx_buffer.lock().unwrap();
         temp_tx_buffer.clear();
-        temp_tx_buffer.extend_from_slice(header.as_ref()).unwrap();
+        temp_tx_buffer.extend_from_slice(&header.bytes()?).unwrap();
         Ok(())
     }
 
@@ -326,12 +323,12 @@ impl<'port> Port<'port> {
     pub fn get_index(&mut self) -> u8 {
         let mut index = self.last_index + 1;
 
-        if index >= MAX_BUF_COUNT {
+        if index >= MAX_BUFFER_COUNT {
             index = 0;
         }
         let mut rx_buf_stat = self.rx_buf_stat.lock().unwrap();
         let index = (index..)
-            .take(MAX_BUF_COUNT)
+            .take(MAX_BUFFER_COUNT)
             .zip(rx_buf_stat.iter().skip(index))
             .find(|&(_, rx_buf_stat)| *rx_buf_stat == BufferState::Empty)
             .map_or(index, |(index, _)| index);
@@ -405,33 +402,34 @@ impl<'port> Port<'port> {
     /// # Returns
     /// Socket send result
     pub fn out_frame_red(&mut self, index: u8) -> Result<i32, NicdrvError> {
-        let mut ehp = EthernetHeader::try_from(
-            self.tx_buffers.lock().unwrap()[usize::from(index)].as_slice(),
+        let mut ehp = EthernetHeader::read_from(
+            &mut self.tx_buffers.lock().unwrap()[usize::from(index)].as_slice(),
         )?;
 
         // Rewrite MAC source address 1 to primary
         ehp.source_address_mut()[1] = Network::from_host(PRIMARY_MAC[1]);
         self.tx_buffers.lock().unwrap()[usize::from(index)]
             .as_mut_slice()
-            .copy_from_slice(ehp.as_ref());
+            .copy_from_slice(&ehp.bytes()?);
 
         // Transmit over primary socket
         let rval = self.out_frame(index.into(), 0);
 
         if self.redstate != RedundancyMode::None {
             let mut tmp_buffer = self.temp_tx_buffer.lock().unwrap();
-            let mut ehp = EthernetHeader::try_from(tmp_buffer.as_slice())?;
+            let mut ehp = EthernetHeader::read_from(&mut tmp_buffer.as_slice())?;
 
             // Use dummy frame for secondary socket transmit (BRD)
-            let mut datagram = EthercatHeader::try_from(&tmp_buffer[ETHERNET_HEADER_SIZE..])?;
+            let mut datagram =
+                EthercatHeader::read_from(&mut &tmp_buffer[EthernetHeader::size()..])?;
 
             // Write index to frame
             *datagram.index_mut() = index;
 
             // Rewrite MAC source address 1 to secondary
             ehp.source_address_mut()[1] = Network::from_host(SECONDARY_MAC[1]);
-            tmp_buffer.copy_from_slice(ehp.as_ref());
-            tmp_buffer[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
+            tmp_buffer.copy_from_slice(&ehp.bytes()?);
+            tmp_buffer[EthernetHeader::size()..].copy_from_slice(&datagram.bytes()?);
 
             // Transmit over secondary socket
             let redport = self.redport.as_ref().unwrap();
@@ -509,10 +507,10 @@ impl<'port> Port<'port> {
     /// # Returns
     /// Workcounter if a frame is found with corresponding index, otherwise error
     pub fn inframe(&mut self, index: u8, stacknumber: i32) -> Result<u16, NicdrvError> {
-        let mut rval = Err(EthercatError::NoFrame);
+        let mut rval = Err(NicdrvError::NoFrame);
 
         // Check if requested index is already in buffer
-        if usize::from(index) < MAX_BUF_COUNT
+        if usize::from(index) < MAX_BUFFER_COUNT
             && self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()[usize::from(index)]
                 != BufferState::Rcvd
         {
@@ -525,17 +523,19 @@ impl<'port> Port<'port> {
             self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()[usize::from(index)] =
                 BufferState::Complete;
         } else if self.receive_packet(stacknumber) != 0 {
-            rval = Err(EthercatError::OtherFramce);
-            let ethernetp = EthernetHeader::try_from(
-                self.get_stack(stacknumber)
+            rval = Err(NicdrvError::OtherFrame);
+            let ethernetp = EthernetHeader::read_from(
+                &mut self
+                    .get_stack(stacknumber)
                     .temp_buf
                     .lock()
                     .unwrap()
                     .as_slice(),
             )?;
             if ethernetp.ethernet_type() == Network::from_host(ETH_P_ECAT) {
-                let ethercatp = EthercatHeader::try_from(
-                    &self.get_stack(stacknumber).temp_buf.lock().unwrap()[ETHERNET_HEADER_SIZE..],
+                let ethercatp = EthercatHeader::read_from(
+                    &mut &self.get_stack(stacknumber).temp_buf.lock().unwrap()
+                        [EthernetHeader::size()..],
                 )?;
                 let l = usize::from(ethercatp.ethercat_length().to_host() & 0x0FFF);
                 let index_found = ethercatp.index();
@@ -547,7 +547,9 @@ impl<'port> Port<'port> {
                     let rx_buf = &mut stack.rx_buffers.lock().unwrap()[usize::from(index)];
                     rx_buf.clear();
                     rx_buf
-                        .extend_from_slice(&stack.temp_buf.lock().unwrap()[ETHERNET_HEADER_SIZE..])
+                        .extend_from_slice(
+                            &stack.temp_buf.lock().unwrap()[EthernetHeader::size()..],
+                        )
                         .unwrap();
 
                     // Return WKC
@@ -557,7 +559,7 @@ impl<'port> Port<'port> {
                     stack.rx_buf_stat.lock().unwrap()[usize::from(index)] = BufferState::Complete;
                     stack.rx_source_address.lock().unwrap()[usize::from(index)] =
                         ethernetp.source_address()[1].to_host().into();
-                } else if usize::from(index_found) < MAX_BUF_COUNT
+                } else if usize::from(index_found) < MAX_BUFFER_COUNT
                     && self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()
                         [usize::from(index_found)]
                         == BufferState::Tx
@@ -570,7 +572,9 @@ impl<'port> Port<'port> {
                     let rx_buf = &mut stack.rx_buffers.lock().unwrap()[usize::from(index_found)];
                     rx_buf.clear();
                     rx_buf
-                        .extend_from_slice(&stack.temp_buf.lock().unwrap()[ETHERNET_HEADER_SIZE..])
+                        .extend_from_slice(
+                            &stack.temp_buf.lock().unwrap()[EthernetHeader::size()..],
+                        )
                         .unwrap();
 
                     // Mark as received
@@ -580,7 +584,7 @@ impl<'port> Port<'port> {
                 }
             }
         }
-        Ok(rval?)
+        rval
     }
 
     /// Blocking redundant receive frame function. If redundant mode is not active, then
@@ -602,14 +606,14 @@ impl<'port> Port<'port> {
     ///
     /// # Returns
     /// Workcounter if a frame is found with corresponding index, otherwise `NicdrvError`
-    pub fn wait_in_frame_red(&mut self, index: u8, timer: &OsalTimer) -> Result<u16, NicdrvError> {
+    fn wait_in_frame_red(&mut self, index: u8, timer: &OsalTimer) -> Result<u16, NicdrvError> {
         // If not in redundant mode, always assume secondary is ok
         let mut wkc2 = if self.redstate == RedundancyMode::None {
             Ok(0)
         } else {
-            Err(NicdrvError::EthercatError(EthercatError::NoFrame))
+            Err(NicdrvError::NoFrame)
         };
-        let mut wkc = Err(NicdrvError::EthercatError(EthercatError::NoFrame));
+        let mut wkc = Err(NicdrvError::NoFrame);
 
         loop {
             // Only read frame if not already in
@@ -670,7 +674,7 @@ impl<'port> Port<'port> {
             // frame is a combined frame that traversed all slaves in standard order.
             if primrx == RX_PRIMARY.into() && secrx == RX_SECONDARY.into() {
                 let tx_buf = &mut self.tx_buffers.lock().unwrap()[usize::from(index)];
-                tx_buf.resize(ETHERNET_HEADER_SIZE, 0).unwrap();
+                tx_buf.resize(EthernetHeader::size(), 0).unwrap();
                 tx_buf
                     .extend_from_slice(
                         self.rx_buffers.lock().unwrap()[usize::from(index)].as_slice(),

@@ -4,17 +4,20 @@
 //! wait for the frame to be returned to the master or timeout. If this is
 //! not acceptable, build your own datagrams and use the functions from nicdrv.rs
 
-use std::time::Duration;
+use std::{io, time::Duration};
 
 use crate::{
     ethercat::r#type::{DATAGRAM_FOLLOWS, ETHERCAT_LENGTH_SIZE},
     oshw::nicdrv::{NicdrvError, Port},
 };
 
-use super::r#type::{
-    high_word, low_word, Buffer, BufferState, Command, Ethercat, EthercatHeader, EthercatRegister,
-    ReadCommand, WriteCommand, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
-    ETHERCAT_WORK_COUNTER_SIZE, ETHERNET_HEADER_SIZE,
+use super::{
+    r#type::{
+        high_word, low_word, Buffer, BufferState, Command, Ethercat, EthercatHeader,
+        EthercatRegister, EthernetHeader, ReadCommand, WriteCommand, ECATTYPE,
+        ETHERCAT_COMMAND_OFFET, ETHERCAT_WORK_COUNTER_SIZE,
+    },
+    ReadFrom, WriteTo,
 };
 
 /// Write data to EtherCAT datagram
@@ -54,6 +57,9 @@ fn write_datagram_data(datagram_data: &mut [u8], command: Command, data: &[u8]) 
 /// - `length`: Length of datagram excluding EtherCAT header
 /// - `data`: Databuffer to be compied in datagram
 ///
+/// # Errors
+/// Returns an error if the Ethercat header couldn't be converted to bytes.
+///
 /// # Panics
 /// Will panic if:
 /// - Data is too large to fit in buffer
@@ -64,30 +70,31 @@ pub fn setup_datagram(
     address_position: u16,
     address_offset: u16,
     data: &[u8],
-) {
+) -> io::Result<()> {
     // Ethernet header is preset and fixed in frame buffers.
     // EtherCAT header needs to be added after that.
-    frame.resize(ETHERNET_HEADER_SIZE, 0).unwrap();
+    frame.resize(EthernetHeader::size(), 0).unwrap();
     frame
         .extend_from_slice(
-            EthercatHeader::new(
+            &EthercatHeader::new(
                 Ethercat::from_host(
-                    (usize::from(ECATTYPE) + ETHERCAT_HEADER_SIZE + data.len()) as u16,
+                    (usize::from(ECATTYPE) + EthercatHeader::size() + data.len()) as u16,
                 ),
                 command,
                 index,
                 Ethercat::from_host(address_position),
                 Ethercat::from_host(address_offset),
                 Ethercat::from_host(data.len() as u16),
-                0,
+                Ethercat::default(),
             )
-            .as_ref(),
+            .bytes()?,
         )
         .unwrap();
     frame.extend_from_slice(data).unwrap();
 
     // Set worker count to 0
     frame.extend_from_slice(&[0; 2]).unwrap();
+    Ok(())
 }
 
 /// Add EtherCAT datagram to a standard ethernet frame with existing datagram(s).
@@ -121,26 +128,29 @@ pub fn add_datagram(
     // Set size of frame in buffer array
     frame
         .resize(
-            previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE
+            previous_length + EthercatHeader::size() - ETHERCAT_LENGTH_SIZE
                 + ETHERCAT_WORK_COUNTER_SIZE
                 + data.len(),
             0,
         )
         .unwrap();
 
-    let mut datagram = EthercatHeader::try_from(&frame[ETHERNET_HEADER_SIZE..]).unwrap();
+    let mut datagram = EthercatHeader::read_from(&mut &frame[EthernetHeader::size()..]).unwrap();
 
     // Add new datargam to ethernet frame size
     *datagram.ethercat_length_mut() = Ethercat::from_host(
-        (usize::from(datagram.ethercat_length().to_host()) + ETHERCAT_HEADER_SIZE + data.len())
+        (usize::from(datagram.ethercat_length().to_host()) + EthercatHeader::size() + data.len())
             as u16,
     );
     *datagram.data_length_mut() =
         Ethercat::from_host(datagram.data_length().to_host() | DATAGRAM_FOLLOWS);
-    frame[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
+    datagram
+        .write_to(&mut &mut frame[EthernetHeader::size()..])
+        .unwrap();
 
     // Set new EtherCAT header position
-    datagram = EthercatHeader::try_from(&frame[previous_length - ETHERCAT_LENGTH_SIZE..]).unwrap();
+    datagram =
+        EthercatHeader::read_from(&mut &frame[previous_length - ETHERCAT_LENGTH_SIZE..]).unwrap();
     *datagram.command_mut() = command;
     *datagram.index_mut() = index;
     *datagram.address_position_mut() = Ethercat::from_host(address_position);
@@ -152,20 +162,22 @@ pub fn add_datagram(
         // This is the last datagram to add
         data.len() as u16
     });
-    frame[previous_length - ETHERCAT_LENGTH_SIZE..].copy_from_slice(datagram.as_ref());
+    datagram
+        .write_to(&mut &mut frame[previous_length - ETHERCAT_LENGTH_SIZE..])
+        .unwrap();
 
     write_datagram_data(
-        &mut frame[previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE..],
+        &mut frame[previous_length + EthercatHeader::size() - ETHERCAT_LENGTH_SIZE..],
         command,
         data,
     );
 
     // Set Work Counter to 0
-    frame[previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE + data.len()..].fill(0);
+    frame[previous_length + EthercatHeader::size() - ETHERCAT_LENGTH_SIZE + data.len()..].fill(0);
 
     // Return offset to data in rx frame, 14 bytes smaller than tx frame due to stripping of
     // thernet header.
-    previous_length + ETHERCAT_HEADER_SIZE - ETHERCAT_LENGTH_SIZE - ETHERCAT_HEADER_SIZE
+    previous_length + EthercatHeader::size() - ETHERCAT_LENGTH_SIZE - EthercatHeader::size()
 }
 
 /// Executes a primitive command
@@ -198,12 +210,12 @@ fn execute_primitive_read_command(
         address_position,
         address_offset,
         data,
-    );
+    )?;
 
     // Send data and wait for answer
     let wkc = port.src_confirm(index, timeout)?;
 
-    data.copy_from_slice(&port.rx_buffers_mut()[usize::from(index)][ETHERCAT_HEADER_SIZE..]);
+    data.copy_from_slice(&port.rx_buffers_mut()[usize::from(index)][EthercatHeader::size()..]);
 
     // Clear buffer status
     port.set_buf_stat(index.into(), BufferState::Empty);
@@ -230,7 +242,7 @@ fn execute_primitive_write_command(
         address_position,
         address_offset,
         data,
-    );
+    )?;
 
     // Send data and wait for answer
     let wkc = port.src_confirm(index, timeout)?;
@@ -797,7 +809,7 @@ pub fn lrwdc(
             low_word(logical_address),
             high_word(logical_address),
             data,
-        );
+        )?;
 
         // FPRMW in second datagram
         let distributed_clock_to_ethercat = Ethercat::from_host(distributed_clock_time[0]);
@@ -816,7 +828,7 @@ pub fn lrwdc(
     {
         let rx_buffer = &mut port.rx_buffers_mut()[usize::from(index)];
         if rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into() {
-            let mut response_iter = rx_buffer[ETHERCAT_HEADER_SIZE..].iter();
+            let mut response_iter = rx_buffer[EthercatHeader::size()..].iter();
             data.iter_mut()
                 .zip(response_iter.by_ref())
                 .for_each(|(dest, src)| *dest = *src);
