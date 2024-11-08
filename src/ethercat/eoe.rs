@@ -13,12 +13,13 @@ use std::{
 
 use crate::ethercat::{
     main::MailboxOut,
-    r#type::{ethercat_to_host, host_to_ethercat, mailbox_header_set_count, MailboxType},
+    r#type::{mailbox_header_set_count, MailboxType},
 };
 
 use super::{
     main::{Context, MailboxHeader, MailboxIn, MainError, MAX_MAILBOX_SIZE},
     r#type::Ethercat,
+    ReadFrom,
 };
 
 /// Use maximum size for EOE mailbox data - mailboxheader and 2 * frameinfo
@@ -327,6 +328,25 @@ impl Default for EthernetOverEthercat {
     }
 }
 
+impl<R: Read> ReadFrom<R> for EthernetOverEthercat {
+    type Err = io::Error;
+
+    fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
+        let mailbox_header = MailboxHeader::read_from(reader)?;
+        let frame_info1 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let info_result = EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::<u16>::from_bytes(
+            Self::read_bytes(reader)?,
+        ));
+        let data = Self::read_bytes(reader)?;
+        Ok(Self {
+            mailbox_header,
+            frame_info1,
+            info_result,
+            data,
+        })
+    }
+}
+
 impl EthernetOverEthercat {
     pub const fn frame_info1(&self) -> Ethercat<u16> {
         self.frame_info1
@@ -346,26 +366,6 @@ impl EthernetOverEthercat {
         writer.write_all(&self.frame_info1.to_bytes())?;
         writer.write_all(&self.info_result.inner().to_bytes())?;
         writer.write_all(&self.data)
-    }
-
-    /// # Errors
-    /// Returns an error if the reader doesn't have enough data to create the object
-    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mailbox_header = MailboxHeader::read_from(reader)?;
-        let mut word = [0; 2];
-        reader.read_exact(&mut word)?;
-        let frame_info1 = Ethercat::<u16>::from_bytes(word);
-        reader.read_exact(&mut word)?;
-        let info_result =
-            EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::<u16>::from_bytes(word));
-        let mut data = [0; MAX_EOE_DATA_LENGTH];
-        reader.read_exact(&mut data)?;
-        Ok(Self {
-            mailbox_header,
-            frame_info1,
-            info_result,
-            data,
-        })
     }
 }
 
@@ -419,7 +419,7 @@ pub fn eoe_set_ip(
     // Empty slave out mailbox if something is in it, with timeout set to 0.
     mailbox_in.receive(context, slave, Duration::default())?;
     let mut eoe = EthernetOverEthercat::default();
-    *eoe.mailbox_header.address_mut() = host_to_ethercat(0);
+    *eoe.mailbox_header.address_mut() = Ethercat::from_host(0);
     *eoe.mailbox_header.priority_mut() = 0;
     let mut data_offset = usize::from(EOE_PARAMETER_OFFSET);
 
@@ -427,7 +427,7 @@ pub fn eoe_set_ip(
     *eoe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::EthernetOverEthercat)
         | mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
 
-    eoe.frame_info1 = host_to_ethercat(
+    eoe.frame_info1 = Ethercat::from_host(
         u16::from(
             eoe_header_frame_type_set(EoEFrameType::InitRequest) | eoe_header_frame_port_set(port),
         ) | EOE_HEADER_LAST_FRAGMENT,
@@ -468,7 +468,7 @@ pub fn eoe_set_ip(
     }
 
     *eoe.mailbox_header.length_mut() =
-        host_to_ethercat(u16::from(EOE_PARAMETER_OFFSET) + data_offset as u16);
+        Ethercat::from_host(u16::from(EOE_PARAMETER_OFFSET) + data_offset as u16);
     eoe.data[0] = flags;
 
     // Send Ethernet over Ethercat request to slave
@@ -484,8 +484,8 @@ pub fn eoe_set_ip(
     let a_eoe = EthernetOverEthercat::read_from(&mut mailbox_in)?;
 
     if a_eoe.mailbox_header.mailbox_type() & 0xF == MailboxType::EthernetOverEthercat.into() {
-        let frame_info1 = ethercat_to_host(a_eoe.frame_info1);
-        let result = ethercat_to_host(a_eoe.info_result.inner());
+        let frame_info1 = a_eoe.frame_info1.to_host();
+        let result = a_eoe.info_result.inner().to_host();
 
         // Slave response should be EoE
         if eoe_header_frame_type_get(frame_info1 as u8)? != EoEFrameType::InitResponse
@@ -534,14 +534,14 @@ pub fn eoe_get_ip(
     *eoe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::EthernetOverEthercat)
         + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
 
-    eoe.frame_info1 = host_to_ethercat(
+    eoe.frame_info1 = Ethercat::from_host(
         u16::from(
             eoe_header_frame_type_set(EoEFrameType::GetIpParameterRequest)
                 | eoe_header_frame_port_set(port),
         ) | EOE_HEADER_LAST_FRAGMENT,
     );
     eoe.info_result = EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::default());
-    *eoe.mailbox_header.length_mut() = host_to_ethercat(4);
+    *eoe.mailbox_header.length_mut() = Ethercat::from_host(4);
     let mut flags = 0;
     eoe.data[0] = flags;
 
@@ -558,8 +558,8 @@ pub fn eoe_get_ip(
     if a_eoe.mailbox_header.mailbox_type() & 0xF == MailboxType::EthernetOverEthercat.into() {
         return Err(EoEError::PacketError);
     }
-    let frame_info1 = ethercat_to_host(eoe.frame_info1);
-    let eoe_data_size = ethercat_to_host(a_eoe.mailbox_header.length()) - 4;
+    let frame_info1 = eoe.frame_info1.to_host();
+    let eoe_data_size = a_eoe.mailbox_header.length().to_host() - 4;
     if eoe_header_frame_type_get(frame_info1 as u8)? != EoEFrameType::GetIpParameterResponse {
         return Err(EoEError::UnsupportedFrameType);
     }
@@ -661,10 +661,11 @@ pub fn eoe_send(
         *eoe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::EthernetOverEthercat)
             + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
 
-        *eoe.mailbox_header.length_mut() = host_to_ethercat(4 + tx_frame_size);
+        *eoe.mailbox_header.length_mut() = Ethercat::from_host(4 + tx_frame_size);
 
-        eoe.frame_info1 = host_to_ethercat(frame_info1);
-        eoe.info_result = EthernetOverEthercatInfoResult::FrameInfo2(host_to_ethercat(frame_info2));
+        eoe.frame_info1 = Ethercat::from_host(frame_info1);
+        eoe.info_result =
+            EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::from_host(frame_info2));
         eoe.data.copy_from_slice(
             &buffer[usize::from(tx_frame_offset)..usize::from(tx_frame_offset + tx_frame_size)],
         );
@@ -726,9 +727,9 @@ pub fn eoe_receive(
         {
             return Err(EoEError::PacketError);
         }
-        let eoe_data_size = ethercat_to_host(a_eoe.mailbox_header.length()) - 4;
-        let frame_info1 = ethercat_to_host(a_eoe.frame_info1);
-        let frame_info2 = ethercat_to_host(a_eoe.info_result.inner());
+        let eoe_data_size = a_eoe.mailbox_header.length().to_host() - 4;
+        let frame_info1 = a_eoe.frame_info1.to_host();
+        let frame_info2 = a_eoe.info_result.inner().to_host();
 
         let header_fragment_number = eoe_header_fragment_number_get(frame_info2 as u8);
         if header_fragment_number != rx_fragment_number && header_fragment_number != 0 {
@@ -808,9 +809,9 @@ pub fn eoe_read_fragment(
     if a_eoe.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::EthernetOverEthercat) {
         return Err(EoEError::PacketError);
     }
-    let eoe_data_size = ethercat_to_host(a_eoe.mailbox_header.length()) - 4;
-    let frame_info1 = ethercat_to_host(a_eoe.frame_info1);
-    let frame_info2 = ethercat_to_host(a_eoe.info_result.inner());
+    let eoe_data_size = a_eoe.mailbox_header.length().to_host() - 4;
+    let frame_info1 = a_eoe.frame_info1.to_host();
+    let frame_info2 = a_eoe.info_result.inner().to_host();
 
     // Retrieve fragment number and check whether it has the expected value
     if *rx_fragment_number != eoe_header_fragment_number_get(frame_info2 as u8) {

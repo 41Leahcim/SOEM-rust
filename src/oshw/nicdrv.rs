@@ -35,16 +35,15 @@ use std::{
 
 use crate::{
     ethercat::r#type::{
-        ethercat_to_host, Buffer, BufferState, Error as EthercatError, EthercatHeader,
-        EthercatHeaderError, EthernetHeader, EthernetHeaderError, ETHERNET_HEADER_SIZE, ETH_P_ECAT,
-        MAX_BUF_COUNT, TIMEOUT_RETURN,
+        Buffer, BufferState, Error as EthercatError, EthercatHeader, EthercatHeaderError,
+        EthernetHeader, EthernetHeaderError, ETHERNET_HEADER_SIZE, ETH_P_ECAT, MAX_BUF_COUNT,
+        TIMEOUT_RETURN,
     },
     osal::OsalTimer,
-    oshw::host_to_network,
     safe_c::{CError, CloseError},
 };
 
-use super::network_to_host;
+use super::Network;
 
 #[derive(Debug)]
 pub enum NicdrvError {
@@ -184,15 +183,15 @@ pub struct Port<'port> {
 }
 
 impl<'port> Port<'port> {
+    /// # Panics
+    /// Will panic if the `tx_buffers` mutex is poisoned.
     pub fn tx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUF_COUNT]> {
         self.tx_buffers.lock().unwrap()
     }
 
+    /// # Panics
+    /// Will panic if the `rx_buffers` mutex is poisoned.
     pub fn rx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUF_COUNT]> {
-        self.rx_buffers.lock().unwrap()
-    }
-
-    pub fn rx_buffers(&self) -> MutexGuard<[Buffer; MAX_BUF_COUNT]> {
         self.rx_buffers.lock().unwrap()
     }
 
@@ -200,6 +199,8 @@ impl<'port> Port<'port> {
         self.redport = Some(red_port);
     }
 
+    /// # Panics
+    /// Will panic if the `tx_buffers` mutex is poisoned.
     pub fn temp_tx_buffer(&self) -> MutexGuard<Buffer> {
         self.temp_tx_buffer.lock().unwrap()
     }
@@ -409,7 +410,7 @@ impl<'port> Port<'port> {
         )?;
 
         // Rewrite MAC source address 1 to primary
-        ehp.source_address_mut()[1] = host_to_network(PRIMARY_MAC[1]);
+        ehp.source_address_mut()[1] = Network::from_host(PRIMARY_MAC[1]);
         self.tx_buffers.lock().unwrap()[usize::from(index)]
             .as_mut_slice()
             .copy_from_slice(ehp.as_ref());
@@ -428,7 +429,7 @@ impl<'port> Port<'port> {
             *datagram.index_mut() = index;
 
             // Rewrite MAC source address 1 to secondary
-            ehp.source_address_mut()[1] = host_to_network(SECONDARY_MAC[1]);
+            ehp.source_address_mut()[1] = Network::from_host(SECONDARY_MAC[1]);
             tmp_buffer.copy_from_slice(ehp.as_ref());
             tmp_buffer[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
 
@@ -532,11 +533,11 @@ impl<'port> Port<'port> {
                     .unwrap()
                     .as_slice(),
             )?;
-            if ethernetp.ethernet_type() == host_to_network(ETH_P_ECAT) {
+            if ethernetp.ethernet_type() == Network::from_host(ETH_P_ECAT) {
                 let ethercatp = EthercatHeader::try_from(
                     &self.get_stack(stacknumber).temp_buf.lock().unwrap()[ETHERNET_HEADER_SIZE..],
                 )?;
-                let l = usize::from(ethercat_to_host(ethercatp.ethercat_length()) & 0x0FFF);
+                let l = usize::from(ethercatp.ethercat_length().to_host() & 0x0FFF);
                 let index_found = ethercatp.index();
 
                 // Check whether the index is the index we're looking for
@@ -555,7 +556,7 @@ impl<'port> Port<'port> {
                     // Mark as completed
                     stack.rx_buf_stat.lock().unwrap()[usize::from(index)] = BufferState::Complete;
                     stack.rx_source_address.lock().unwrap()[usize::from(index)] =
-                        network_to_host(ethernetp.source_address()[1]).into();
+                        ethernetp.source_address()[1].to_host().into();
                 } else if usize::from(index_found) < MAX_BUF_COUNT
                     && self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()
                         [usize::from(index_found)]
@@ -575,7 +576,7 @@ impl<'port> Port<'port> {
                     // Mark as received
                     stack.rx_buf_stat.lock().unwrap()[usize::from(index_found)] = BufferState::Rcvd;
                     stack.rx_source_address.lock().unwrap()[usize::from(index_found)] =
-                        network_to_host(ethernetp.source_address()[1]).into();
+                        ethernetp.source_address()[1].to_host().into();
                 }
             }
         }
@@ -770,7 +771,7 @@ fn initialize_socket(interface_name: &str) -> Result<i32, CError> {
     let socket = socket(
         PF_PACKET,
         SOCK_RAW,
-        host_to_network::<u16>(ETH_P_ECAT).into_inner().into(),
+        Network::from_host(ETH_P_ECAT).into_inner().into(),
     )?;
 
     let mut timeout = timeval {
@@ -838,7 +839,7 @@ fn initialize_socket(interface_name: &str) -> Result<i32, CError> {
     let sll = sockaddr_ll {
         sll_family: AF_PACKET as u16,
         sll_ifindex: ifindex,
-        sll_protocol: host_to_network(ETH_P_ECAT).into_inner(),
+        sll_protocol: Network::from_host(ETH_P_ECAT).into_inner(),
         ..unsafe { zeroed() }
     };
     unsafe {

@@ -7,13 +7,13 @@
 use std::time::Duration;
 
 use crate::{
-    ethercat::r#type::{ethercat_to_host, DATAGRAM_FOLLOWS, ETHERCAT_LENGTH_SIZE},
+    ethercat::r#type::{DATAGRAM_FOLLOWS, ETHERCAT_LENGTH_SIZE},
     oshw::nicdrv::{NicdrvError, Port},
 };
 
 use super::r#type::{
-    high_word, host_to_ethercat, low_word, Buffer, BufferState, CommandType, Ethercat,
-    EthercatHeader, EthercatRegister, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
+    high_word, low_word, Buffer, BufferState, Command, Ethercat, EthercatHeader, EthercatRegister,
+    ReadCommand, WriteCommand, ECATTYPE, ETHERCAT_COMMAND_OFFET, ETHERCAT_HEADER_SIZE,
     ETHERCAT_WORK_COUNTER_SIZE, ETHERNET_HEADER_SIZE,
 };
 
@@ -24,14 +24,16 @@ use super::r#type::{
 /// - `command`: Command being executed
 /// - `length`: Length of databuffer
 /// - `data`: Databuffer to be copied into datagram
-fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u8]) {
+fn write_datagram_data(datagram_data: &mut [u8], command: Command, data: &[u8]) {
     if !data.is_empty() {
         match command {
-            CommandType::Nop
-            | CommandType::AutoPointerRead
-            | CommandType::FixedPointerRead
-            | CommandType::BroadcastRead
-            | CommandType::LogicalRead => {
+            Command::ReadCommand(
+                ReadCommand::Nop
+                | ReadCommand::AutoPointerRead
+                | ReadCommand::FixedPointerRead
+                | ReadCommand::BroadcastRead
+                | ReadCommand::LogicalRead,
+            ) => {
                 // No data to write, initialize data so frame is in a known state
                 datagram_data.fill(0);
             }
@@ -57,7 +59,7 @@ fn write_datagram_data(datagram_data: &mut [u8], command: CommandType, data: &[u
 /// - Data is too large to fit in buffer
 pub fn setup_datagram(
     frame: &mut Buffer,
-    command: CommandType,
+    command: Command,
     index: u8,
     address_position: u16,
     address_offset: u16,
@@ -69,14 +71,14 @@ pub fn setup_datagram(
     frame
         .extend_from_slice(
             EthercatHeader::new(
-                host_to_ethercat(
+                Ethercat::from_host(
                     (usize::from(ECATTYPE) + ETHERCAT_HEADER_SIZE + data.len()) as u16,
                 ),
                 command,
                 index,
-                host_to_ethercat(address_position),
-                host_to_ethercat(address_offset),
-                host_to_ethercat(data.len() as u16),
+                Ethercat::from_host(address_position),
+                Ethercat::from_host(address_offset),
+                Ethercat::from_host(data.len() as u16),
                 0,
             )
             .as_ref(),
@@ -106,7 +108,7 @@ pub fn setup_datagram(
 /// Offset to data in rx frame, usefull to retrieve data after RX
 pub fn add_datagram(
     frame: &mut Buffer,
-    command: CommandType,
+    command: Command,
     index: u8,
     more: bool,
     address_position: u16,
@@ -129,22 +131,21 @@ pub fn add_datagram(
     let mut datagram = EthercatHeader::try_from(&frame[ETHERNET_HEADER_SIZE..]).unwrap();
 
     // Add new datargam to ethernet frame size
-    *datagram.ethercat_length_mut() = host_to_ethercat(
-        (usize::from(ethercat_to_host(datagram.ethercat_length()))
-            + ETHERCAT_HEADER_SIZE
-            + data.len()) as u16,
+    *datagram.ethercat_length_mut() = Ethercat::from_host(
+        (usize::from(datagram.ethercat_length().to_host()) + ETHERCAT_HEADER_SIZE + data.len())
+            as u16,
     );
     *datagram.data_length_mut() =
-        host_to_ethercat(ethercat_to_host(datagram.data_length()) | DATAGRAM_FOLLOWS);
+        Ethercat::from_host(datagram.data_length().to_host() | DATAGRAM_FOLLOWS);
     frame[ETHERNET_HEADER_SIZE..].copy_from_slice(datagram.as_ref());
 
     // Set new EtherCAT header position
     datagram = EthercatHeader::try_from(&frame[previous_length - ETHERCAT_LENGTH_SIZE..]).unwrap();
     *datagram.command_mut() = command;
     *datagram.index_mut() = index;
-    *datagram.address_position_mut() = host_to_ethercat(address_position);
-    *datagram.address_offset_mut() = host_to_ethercat(address_offset);
-    *datagram.data_length_mut() = host_to_ethercat(if more {
+    *datagram.address_position_mut() = Ethercat::from_host(address_position);
+    *datagram.address_offset_mut() = Ethercat::from_host(address_offset);
+    *datagram.data_length_mut() = Ethercat::from_host(if more {
         // This is not the last datagram to add
         data.len() as u16 | DATAGRAM_FOLLOWS
     } else {
@@ -178,13 +179,13 @@ pub fn add_datagram(
 /// - `command`: command to execute
 ///
 /// # Returns Workcounter or error
-fn execute_primitive_command(
+fn execute_primitive_read_command(
     port: &mut Port,
     address_position: u16,
     address_offset: u16,
     data: &mut [u8],
     timeout: Duration,
-    command: CommandType,
+    command: ReadCommand,
 ) -> Result<u16, NicdrvError> {
     // Get fresh index
     let index = port.get_index();
@@ -192,7 +193,7 @@ fn execute_primitive_command(
     // Setup datagram
     setup_datagram(
         &mut port.tx_buffers_mut()[usize::from(index)],
-        command,
+        Command::ReadCommand(command),
         index,
         address_position,
         address_offset,
@@ -202,28 +203,37 @@ fn execute_primitive_command(
     // Send data and wait for answer
     let wkc = port.src_confirm(index, timeout)?;
 
-    match command {
-        CommandType::Nop
-        | CommandType::AutoPointerWrite
-        | CommandType::FixedPointerWrite
-        | CommandType::BroadcastWrite
-        | CommandType::LogicalWrite => {}
+    data.copy_from_slice(&port.rx_buffers_mut()[usize::from(index)][ETHERCAT_HEADER_SIZE..]);
 
-        CommandType::AutoPointerRead
-        | CommandType::AutoPointerReadWrite
-        | CommandType::FixedPointerRead
-        | CommandType::FixedPointerReadWrite
-        | CommandType::BroadcastRead
-        | CommandType::BroadcastReadWrite
-        | CommandType::LogicalRead
-        | CommandType::LogicalReadWrite
-        | CommandType::AutoReadMultipleWrite
-        | CommandType::FixedReadMultipleWrite => {
-            data.copy_from_slice(
-                &port.rx_buffers_mut()[usize::from(index)][ETHERCAT_HEADER_SIZE..],
-            );
-        }
-    }
+    // Clear buffer status
+    port.set_buf_stat(index.into(), BufferState::Empty);
+
+    Ok(wkc)
+}
+
+fn execute_primitive_write_command(
+    port: &mut Port,
+    address_position: u16,
+    address_offset: u16,
+    data: &[u8],
+    timeout: Duration,
+    command: WriteCommand,
+) -> Result<u16, NicdrvError> {
+    // Get fresh index
+    let index = port.get_index();
+
+    // Setup datagram
+    setup_datagram(
+        &mut port.tx_buffers_mut()[usize::from(index)],
+        Command::WriteCommand(command),
+        index,
+        address_position,
+        address_offset,
+        data,
+    );
+
+    // Send data and wait for answer
+    let wkc = port.src_confirm(index, timeout)?;
 
     // Clear buffer status
     port.set_buf_stat(index.into(), BufferState::Empty);
@@ -249,16 +259,16 @@ pub fn bwr(
     port: &mut Port,
     address_position: u16,
     address_offset: EthercatRegister,
-    data: &mut [u8],
+    data: &[u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_write_command(
         port,
         address_position,
         address_offset as u16,
         data,
         timeout,
-        CommandType::BroadcastWrite,
+        WriteCommand::BroadcastWrite,
     )
 }
 
@@ -283,13 +293,13 @@ pub fn brd(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         address_position,
         address_offset as u16,
         data,
         timeout,
-        CommandType::BroadcastRead,
+        ReadCommand::BroadcastRead,
     )
 }
 
@@ -315,13 +325,13 @@ pub fn aprd(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         address_position,
         address_offset,
         data,
         timeout,
-        CommandType::AutoPointerRead,
+        ReadCommand::AutoPointerRead,
     )
 }
 
@@ -347,13 +357,13 @@ pub fn armw(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         address_position,
         address_offset,
         data,
         timeout,
-        CommandType::AutoReadMultipleWrite,
+        ReadCommand::AutoReadMultipleWrite,
     )
 }
 
@@ -379,13 +389,13 @@ pub fn frmw(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         address_position,
         address_offset,
         data,
         timeout,
-        CommandType::FixedReadMultipleWrite,
+        ReadCommand::FixedReadMultipleWrite,
     )
 }
 
@@ -440,13 +450,13 @@ pub fn fprd(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         address_position,
         address_offset,
         data,
         timeout,
-        CommandType::FixedPointerRead,
+        ReadCommand::FixedPointerRead,
     )
 }
 
@@ -558,16 +568,16 @@ pub fn apwr(
     port: &mut Port,
     address_position: u16,
     address_offset: u16,
-    data: &mut [u8],
+    data: &[u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_write_command(
         port,
         address_position,
         address_offset,
         data,
         timeout,
-        CommandType::AutoPointerWrite,
+        WriteCommand::AutoPointerWrite,
     )
 }
 
@@ -596,7 +606,7 @@ pub fn apwrw(
         port,
         address_position,
         address_offset as u16,
-        &mut data.to_bytes(),
+        &data.to_bytes(),
         timeout,
     )
 }
@@ -618,16 +628,16 @@ pub fn fpwr(
     port: &mut Port,
     address_position: u16,
     address_offset: u16,
-    data: &mut [u8],
+    data: &[u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_write_command(
         port,
         address_position,
         address_offset,
         data,
         timeout,
-        CommandType::FixedPointerWrite,
+        WriteCommand::FixedPointerWrite,
     )
 }
 
@@ -656,7 +666,7 @@ pub fn fpwrw(
         port,
         address_position,
         address_offset as u16,
-        &mut data.to_bytes(),
+        &data.to_bytes(),
         timeout,
     )
 }
@@ -680,13 +690,13 @@ pub fn lrw(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         low_word(logical_address),
         high_word(logical_address),
         data,
         timeout,
-        CommandType::LogicalReadWrite,
+        ReadCommand::LogicalReadWrite,
     )
 }
 
@@ -709,13 +719,13 @@ pub fn lrd(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_read_command(
         port,
         low_word(logical_address),
         high_word(logical_address),
         data,
         timeout,
-        CommandType::LogicalRead,
+        ReadCommand::LogicalRead,
     )
 }
 
@@ -735,16 +745,16 @@ pub fn lrd(
 pub fn lwr(
     port: &mut Port,
     logical_address: u32,
-    data: &mut [u8],
+    data: &[u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_command(
+    execute_primitive_write_command(
         port,
         low_word(logical_address),
         high_word(logical_address),
         data,
         timeout,
-        CommandType::LogicalWrite,
+        WriteCommand::LogicalWrite,
     )
 }
 
@@ -782,7 +792,7 @@ pub fn lrwdc(
         // Logical read write in first datagram
         setup_datagram(
             tx_buffer,
-            CommandType::LogicalReadWrite,
+            ReadCommand::LogicalReadWrite.into(),
             index,
             low_word(logical_address),
             high_word(logical_address),
@@ -790,10 +800,10 @@ pub fn lrwdc(
         );
 
         // FPRMW in second datagram
-        let distributed_clock_to_ethercat = host_to_ethercat(distributed_clock_time[0]);
+        let distributed_clock_to_ethercat = Ethercat::from_host(distributed_clock_time[0]);
         add_datagram(
             tx_buffer,
-            CommandType::FixedReadMultipleWrite,
+            ReadCommand::FixedReadMultipleWrite.into(),
             index,
             false,
             distributed_clock_reference_slave,
@@ -805,7 +815,7 @@ pub fn lrwdc(
     let mut wkc = port.src_confirm(index, timeout).unwrap();
     {
         let rx_buffer = &mut port.rx_buffers_mut()[usize::from(index)];
-        if rx_buffer[ETHERCAT_COMMAND_OFFET] == CommandType::LogicalReadWrite.into() {
+        if rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into() {
             let mut response_iter = rx_buffer[ETHERCAT_HEADER_SIZE..].iter();
             data.iter_mut()
                 .zip(response_iter.by_ref())

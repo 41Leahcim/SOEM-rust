@@ -12,7 +12,7 @@ use std::{array, time::Duration};
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use num_traits::PrimInt;
 
-use crate::oshw::{host_to_network, Network};
+use crate::oshw::Network;
 
 use super::main::{MainError, PacketError};
 
@@ -129,9 +129,9 @@ pub struct EthernetHeader {
 
 impl EthernetHeader {
     pub fn new(mac: [u16; 3]) -> Self {
-        let destination_address = array::from_fn(|_| host_to_network(0xFFFF));
-        let source_address = array::from_fn(|i| host_to_network(mac[i]));
-        let etype = host_to_network(ETH_P_ECAT);
+        let destination_address = array::from_fn(|_| Network::from_host(0xFFFF));
+        let source_address = array::from_fn(|i| Network::from_host(mac[i]));
+        let etype = Network::from_host(ETH_P_ECAT);
         Self {
             destination_address,
             source_address,
@@ -200,11 +200,11 @@ pub const ETHERNET_HEADER_SIZE: usize = size_of::<EthernetHeader>();
 #[derive(Debug)]
 pub enum EthercatHeaderError {
     WrongSize(usize),
-    InvalidCommandType(InvalidCommandType),
+    InvalidCommandType(InvalidCommand),
 }
 
-impl From<InvalidCommandType> for EthercatHeaderError {
-    fn from(value: InvalidCommandType) -> Self {
+impl From<InvalidCommand> for EthercatHeaderError {
+    fn from(value: InvalidCommand) -> Self {
         Self::InvalidCommandType(value)
     }
 }
@@ -216,7 +216,7 @@ pub struct EthercatHeader {
     ethercat_length: Ethercat<u16>,
 
     /// EtherCAT command
-    command: CommandType,
+    command: Command,
 
     /// Index used in SOEM for Tx to Rx recombination
     index: u8,
@@ -235,7 +235,7 @@ pub struct EthercatHeader {
 impl EthercatHeader {
     pub const fn new(
         ethercat_length: Ethercat<u16>,
-        command: CommandType,
+        command: Command,
         index: u8,
         address_position: Ethercat<u16>,
         address_offset: Ethercat<u16>,
@@ -269,7 +269,7 @@ impl EthercatHeader {
         self.data_length
     }
 
-    pub fn command_mut(&mut self) -> &mut CommandType {
+    pub fn command_mut(&mut self) -> &mut Command {
         &mut self.command
     }
 
@@ -297,7 +297,7 @@ impl TryFrom<&[u8]> for EthercatHeader {
         if value.len() < size_of::<Self>() {
             return Err(EthercatHeaderError::WrongSize(value.len()));
         }
-        let command = CommandType::try_from(value[2])?;
+        let command = Command::try_from(value[2])?;
         Ok(Self {
             ethercat_length: Ethercat::from_raw(u16::from_ne_bytes(value[..2].try_into().unwrap())),
             command,
@@ -482,86 +482,145 @@ impl TryFrom<u8> for Datatype {
     }
 }
 
-#[expect(dead_code)]
-#[derive(Debug)]
-pub struct InvalidCommandType(u8);
+pub struct InvalidWriteCommand(u8);
 
-/// Ethernet command types
 #[derive(Debug, Clone, Copy)]
-pub enum CommandType {
+pub enum WriteCommand {
     /// No operation
-    Nop,
-
-    /// Auto increment read
-    AutoPointerRead,
+    Nop = 0,
 
     /// Auto increment write
-    AutoPointerWrite,
-
-    /// Auto increment read/write
-    AutoPointerReadWrite,
-
-    /// Configured address read
-    FixedPointerRead,
+    AutoPointerWrite = 2,
 
     /// Configured address write
-    FixedPointerWrite,
-
-    /// Configured address read/write
-    FixedPointerReadWrite,
-
-    /// Broadcast read
-    BroadcastRead,
+    FixedPointerWrite = 5,
 
     /// Broadcast write
-    BroadcastWrite,
-
-    /// Broadcast read/write
-    BroadcastReadWrite,
-
-    /// Logical memory read
-    LogicalRead,
+    BroadcastWrite = 8,
 
     /// Logical memory write
-    LogicalWrite,
-
-    /// Logical memory read/write
-    LogicalReadWrite,
-
-    /// Auto increment read multiple write
-    AutoReadMultipleWrite,
-
-    /// Configured read multiple write
-    FixedReadMultipleWrite,
+    LogicalWrite = 11,
 }
 
-impl From<CommandType> for u8 {
-    fn from(value: CommandType) -> Self {
+impl From<WriteCommand> for u8 {
+    fn from(value: WriteCommand) -> Self {
         value as u8
     }
 }
 
-impl TryFrom<u8> for CommandType {
-    type Error = InvalidCommandType;
+impl TryFrom<u8> for WriteCommand {
+    type Error = InvalidWriteCommand;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(CommandType::Nop),
-            1 => Ok(CommandType::AutoPointerRead),
-            2 => Ok(CommandType::AutoPointerWrite),
-            3 => Ok(CommandType::AutoPointerReadWrite),
-            4 => Ok(CommandType::FixedPointerRead),
-            5 => Ok(CommandType::FixedPointerWrite),
-            6 => Ok(CommandType::FixedPointerReadWrite),
-            7 => Ok(CommandType::BroadcastRead),
-            8 => Ok(CommandType::BroadcastWrite),
-            9 => Ok(CommandType::BroadcastReadWrite),
-            10 => Ok(CommandType::LogicalRead),
-            11 => Ok(CommandType::LogicalWrite),
-            12 => Ok(CommandType::LogicalReadWrite),
-            13 => Ok(CommandType::AutoReadMultipleWrite),
-            14 => Ok(CommandType::FixedReadMultipleWrite),
-            _ => Err(InvalidCommandType(value)),
+            0 => Ok(Self::Nop),
+            2 => Ok(Self::AutoPointerWrite),
+            5 => Ok(Self::FixedPointerWrite),
+            8 => Ok(Self::BroadcastWrite),
+            _ => Err(InvalidWriteCommand(value)),
+        }
+    }
+}
+
+#[expect(dead_code)]
+#[derive(Debug)]
+pub struct InvalidReadCommand(u8);
+
+/// Ethernet command types
+#[derive(Debug, Clone, Copy)]
+pub enum ReadCommand {
+    /// No operation
+    Nop = 0,
+
+    /// Auto increment read
+    AutoPointerRead = 1,
+
+    /// Auto increment read/write
+    AutoPointerReadWrite = 3,
+
+    /// Configured address read
+    FixedPointerRead = 4,
+
+    /// Configured address read/write
+    FixedPointerReadWrite = 6,
+
+    /// Broadcast read
+    BroadcastRead = 7,
+
+    /// Broadcast read/write
+    BroadcastReadWrite = 9,
+
+    /// Logical memory read
+    LogicalRead = 10,
+
+    /// Logical memory read/write
+    LogicalReadWrite = 12,
+
+    /// Auto increment read multiple write
+    AutoReadMultipleWrite = 13,
+
+    /// Configured read multiple write
+    FixedReadMultipleWrite = 14,
+}
+
+impl From<ReadCommand> for u8 {
+    fn from(value: ReadCommand) -> Self {
+        value as u8
+    }
+}
+
+impl TryFrom<u8> for ReadCommand {
+    type Error = InvalidReadCommand;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Nop),
+            1 => Ok(Self::AutoPointerRead),
+            3 => Ok(Self::AutoPointerReadWrite),
+            4 => Ok(Self::FixedPointerRead),
+            6 => Ok(Self::FixedPointerReadWrite),
+            7 => Ok(Self::BroadcastRead),
+            9 => Ok(Self::BroadcastReadWrite),
+            10 => Ok(Self::LogicalRead),
+            12 => Ok(Self::LogicalReadWrite),
+            13 => Ok(Self::AutoReadMultipleWrite),
+            14 => Ok(Self::FixedReadMultipleWrite),
+            _ => Err(InvalidReadCommand(value)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct InvalidCommand(u8);
+
+#[derive(Debug, Clone, Copy)]
+pub enum Command {
+    ReadCommand(ReadCommand),
+    WriteCommand(WriteCommand),
+}
+
+impl From<ReadCommand> for Command {
+    fn from(value: ReadCommand) -> Self {
+        Self::ReadCommand(value)
+    }
+}
+
+impl From<WriteCommand> for Command {
+    fn from(value: WriteCommand) -> Self {
+        Self::WriteCommand(value)
+    }
+}
+
+impl TryFrom<u8> for Command {
+    type Error = InvalidCommand;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if let Ok(command) = ReadCommand::try_from(value) {
+            Ok(command.into())
+        } else if let Ok(command) = WriteCommand::try_from(value) {
+            Ok(command.into())
+        } else {
+            Err(InvalidCommand(value))
         }
     }
 }
@@ -834,10 +893,6 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
         }
     }
 }
-
-#[expect(dead_code)]
-#[derive(Debug)]
-pub struct InvalidCommand(u8);
 
 /// CANopen over EtherCAT object description command
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1182,6 +1237,18 @@ impl<Int: PrimInt> Ethercat<Int> {
     pub fn is_zero(self) -> bool {
         self.0.is_zero()
     }
+
+    pub fn to_host(self) -> Int {
+        if cfg!(target_endian = "big") {
+            self.0.to_be()
+        } else {
+            self.0
+        }
+    }
+
+    pub fn from_host(value: Int) -> Self {
+        Self(value.to_le())
+    }
 }
 
 macro_rules! ethercat_bytes {
@@ -1203,15 +1270,3 @@ ethercat_bytes!(u32);
 ethercat_bytes!(i32);
 ethercat_bytes!(i64);
 ethercat_bytes!(u64);
-
-pub fn host_to_ethercat<Int: PrimInt>(value: Int) -> Ethercat<Int> {
-    Ethercat(value.to_le())
-}
-
-pub fn ethercat_to_host<Int: PrimInt>(value: Ethercat<Int>) -> Int {
-    if cfg!(target_endian = "big") {
-        value.0.to_be()
-    } else {
-        value.0
-    }
-}

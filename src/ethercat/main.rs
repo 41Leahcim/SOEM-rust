@@ -23,27 +23,29 @@ use super::{
     base::{aprd, brd, bwr, fpwr, fpwrw},
     dc::DistributedClock,
     r#type::{
-        host_to_ethercat, AbortError, ErrorType, Ethercat, EthercatState, SiiCategory,
-        SiiGeneralItem, DEFAULT_RETRIES, EEPROM_STATE_MACHINE_BUSY, ETHERCAT_COMMAND_OFFET,
+        AbortError, ErrorType, Ethercat, EthercatState, ReadCommand, SiiCategory, SiiGeneralItem,
+        WriteCommand, DEFAULT_RETRIES, EEPROM_STATE_MACHINE_BUSY, ETHERCAT_COMMAND_OFFET,
         MAX_BUF_COUNT, TIMEOUT_RETURN,
     },
+    ReadFrom,
 };
 use crate::{
     ethercat::{
         base::{add_datagram, apwr, fprd, setup_datagram},
         eoe::{eoe_header_frame_type_get, EoEFrameType, EthernetOverEthercat},
         r#type::{
-            ethercat_to_host, high_byte, high_word, low_word, BufferState, CommandType,
-            EepromCommand, EthercatRegister, EthernetHeader, MailboxType,
-            EEPROM_STATE_MACHINE_ERROR_MASK, EEPROM_STATE_MACHINE_ERROR_NACK,
-            EEPROM_STATE_MACHINE_READ64, ETHERCAT_HEADER_SIZE, ETHERCAT_WORK_COUNTER_SIZE,
-            ETHERNET_HEADER_SIZE, MAX_EEP_BUF_SIZE, SII_START, TIMEOUT_EEP, TIMEOUT_RET3,
+            high_byte, high_word, low_word, BufferState, EepromCommand, EthercatRegister,
+            EthernetHeader, MailboxType, EEPROM_STATE_MACHINE_ERROR_MASK,
+            EEPROM_STATE_MACHINE_ERROR_NACK, EEPROM_STATE_MACHINE_READ64, ETHERCAT_HEADER_SIZE,
+            ETHERCAT_WORK_COUNTER_SIZE, ETHERNET_HEADER_SIZE, MAX_EEP_BUF_SIZE, SII_START,
+            TIMEOUT_EEP, TIMEOUT_RET3,
         },
     },
     osal::OsalTimer,
     oshw::{
-        self, host_to_network,
+        self,
         nicdrv::{NicdrvError, SECONDARY_MAC},
+        Network,
     },
 };
 
@@ -287,7 +289,7 @@ impl<'sm> From<&'sm mut SyncManager> for &'sm mut [u8] {
 
 pub struct StateStatus {
     state: u16,
-    unused: u16,
+    _unused: u16,
     al_status_code: u16,
 }
 
@@ -1153,9 +1155,9 @@ impl Eeprom {
     /// # Errors
     /// Returns an error if the writer doesn't have enough capacity for the eeprom
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<usize> {
-        writer.write_all(&host_to_ethercat(self.command as u16).to_bytes())?;
-        writer.write_all(&host_to_ethercat(self.address).to_bytes())?;
-        writer.write_all(&host_to_ethercat(self.d2).to_bytes())?;
+        writer.write_all(&Ethercat::from_host(self.command as u16).to_bytes())?;
+        writer.write_all(&Ethercat::from_host(self.address).to_bytes())?;
+        writer.write_all(&Ethercat::from_host(self.d2).to_bytes())?;
         Ok(3 * size_of::<u16>())
     }
 }
@@ -1600,7 +1602,7 @@ impl MailboxIn {
                 &mut word,
                 TIMEOUT_RETURN,
             )?;
-            let sync_manager_status = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+            let sync_manager_status = Ethercat::<u16>::from_bytes(word).to_host();
 
             if sync_manager_status & 8 == 0 && timeout > LOCAL_DELAY {
                 thread::sleep(LOCAL_DELAY);
@@ -1628,7 +1630,7 @@ impl MailboxIn {
                 // Mailbox error response
                 if work_counter > 0 && mailbox_header.mailbox_type.trailing_zeros() >= 4 {
                     let mailbox_error = MailboxError::read_from(&mut self.data.as_slice())?;
-                    context.mailbox_error(slave, ethercat_to_host(mailbox_error.detail));
+                    context.mailbox_error(slave, mailbox_error.detail.to_host());
 
                     // Prevent emergency to cascade up, it's already handled
                     work_counter = 0;
@@ -1638,14 +1640,14 @@ impl MailboxIn {
                     // If a CanOpen over EtherCAT response was received
                     let emergency_request = EmergencyRequest::read_from(&mut self.data.as_slice())?;
                     // Is it an emergency request
-                    if ethercat_to_host(emergency_request.can_open) >> 12 == 1 {
+                    if emergency_request.can_open.to_host() >> 12 == 1 {
                         context.mailbox_emergency_error(
                             slave,
-                            ethercat_to_host(emergency_request.error_code),
+                            emergency_request.error_code.to_host(),
                             emergency_request.error_register,
                             emergency_request.byte_data,
-                            ethercat_to_host(emergency_request.word1),
-                            ethercat_to_host(emergency_request.word2),
+                            emergency_request.word1.to_host(),
+                            emergency_request.word2.to_host(),
                         );
                         // Prevent emergency to cascade up, it's already handled
                         work_counter = 0;
@@ -1655,7 +1657,7 @@ impl MailboxIn {
                 {
                     // Ethernet over EtherCAT response
                     let eoe_mailbox = EthernetOverEthercat::read_from(&mut self.data.as_slice())?;
-                    let frame_info1 = ethercat_to_host(eoe_mailbox.frame_info1());
+                    let frame_info1 = eoe_mailbox.frame_info1().to_host();
 
                     // All non fragment data frame types are expected to be handled by slave
                     // send/receive API if the Ethernet over EtherCAT hook is set.
@@ -1670,13 +1672,13 @@ impl MailboxIn {
                     }
                 } else if work_counter == 0 {
                     // Read mailbox lost
-                    let sync_manager_status = host_to_ethercat(sync_manager_status ^ 0x200);
-                    let mut word = sync_manager_status.to_bytes();
+                    let sync_manager_status = Ethercat::from_host(sync_manager_status ^ 0x200);
+                    let word = sync_manager_status.to_bytes();
                     fpwr(
                         &mut context.port,
                         config_address,
                         EthercatRegister::SyncManager1Status.into(),
-                        &mut word,
+                        &word,
                         TIMEOUT_RETURN,
                     )?;
                     let sync_manager_status = Ethercat::<u16>::from_bytes(word);
@@ -1693,7 +1695,7 @@ impl MailboxIn {
                         )?;
                         if (work_counter2 > 0
                             && sync_manager_control[0] & 2
-                                == high_byte(ethercat_to_host(sync_manager_status)) & 2)
+                                == high_byte(sync_manager_status.to_host()) & 2)
                             || timer.is_expired()
                         {
                             break;
@@ -1710,8 +1712,7 @@ impl MailboxIn {
                             &mut word,
                             TIMEOUT_RETURN,
                         )?;
-                        let sync_manager_status =
-                            ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                        let sync_manager_status = Ethercat::<u16>::from_bytes(word).to_host();
                         if sync_manager_status & 8 == 0 && timeout == LOCAL_DELAY {
                             thread::sleep(LOCAL_DELAY);
                         }
@@ -1763,7 +1764,7 @@ pub struct MailboxOut {
 
 impl Write for MailboxOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.data.as_mut_slice().write(buf)?;
+        let written = (&mut self.data[self.write_index..]).write(buf)?;
         self.write_index += written;
         Ok(written)
     }
@@ -1814,7 +1815,7 @@ impl MailboxOut {
             &mut context.port,
             config_address,
             mailbox_write_offset,
-            &mut self.data,
+            &self.data[..self.write_index],
             TIMEOUT_RET3,
         )
         .map_err(MainError::from)
@@ -2484,13 +2485,13 @@ impl<'context> Context<'context> {
 
         // Prepare "dummy" broadcat read tx frame for redundant operation
         let mut ethernet_header = EthernetHeader::try_from(port.temp_tx_buffer().as_slice())?;
-        ethernet_header.source_address_mut()[1] = host_to_network(SECONDARY_MAC[0]);
+        ethernet_header.source_address_mut()[1] = Network::from_host(SECONDARY_MAC[0]);
         port.temp_tx_buffer()
             .copy_from_slice(ethernet_header.as_ref());
         let zbuf = [0; 2];
         setup_datagram(
             &mut port.temp_tx_buffer(),
-            CommandType::BroadcastRead,
+            ReadCommand::BroadcastRead.into(),
             0,
             0,
             2,
@@ -2712,9 +2713,8 @@ impl<'context> Context<'context> {
             8
         } else {
             // 4 byte response
-            self.esibuf[usize::from(eeprom_address) << 1..].copy_from_slice(
-                &host_to_ethercat(ethercat_to_host(eeprom_data64) as u32).to_bytes(),
-            );
+            self.esibuf[usize::from(eeprom_address) << 1..]
+                .copy_from_slice(&Ethercat::from_host(eeprom_data64.to_host() as u32).to_bytes());
             4
         };
 
@@ -2862,9 +2862,15 @@ impl<'context> Context<'context> {
     /// # Parameters
     /// `context`: Context struct
     ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Failed to read the state of the slaves
+    /// - Failed to read application layer status of slaves
+    /// - Received state isn't a valid ethercat state
+    ///
     /// # Returns
     /// lowest state found.
-    fn read_state(&mut self) -> Result<EthercatState, MainError> {
+    pub fn read_state(&mut self) -> Result<EthercatState, MainError> {
         // Try to establish the state of all slaves, sending only one broadcast datagram.
         // This way, a number of datagrams equal to the number of slaves will be send when needed.
         let mut byte = [0];
@@ -2889,13 +2895,13 @@ impl<'context> Context<'context> {
 
         let bitwise_state = received_value & 0xF;
         let all_slaves_same_state = match EthercatState::try_from(bitwise_state) {
-            state @ Ok(
-                EthercatState::Init
+            Ok(
+                state @ (EthercatState::Init
                 | EthercatState::PreOperational
                 | EthercatState::SafeOperational
-                | EthercatState::Operational,
+                | EthercatState::Operational),
             ) => {
-                self.slavelist[0].state = state.unwrap();
+                self.slavelist[0].state = state;
                 true
             }
             _ => false,
@@ -2948,9 +2954,9 @@ impl<'context> Context<'context> {
                 )?;
 
                 for slave in fslave..=lslave {
-                    let received_value = ethercat_to_host(sl[usize::from(slave - fslave)].status);
+                    let received_value = sl[usize::from(slave - fslave)].status.to_host();
                     self.slavelist[usize::from(slave)].al_status_code =
-                        ethercat_to_host(sl[usize::from(slave - fslave)].code);
+                        sl[usize::from(slave - fslave)].code.to_host();
                     lowest = lowest.min(received_value & 0xF);
                     self.slavelist[usize::from(slave)].state =
                         EthercatState::try_from(received_value as u8)?;
@@ -2985,12 +2991,12 @@ impl<'context> Context<'context> {
     /// Workcounter or error
     pub fn write_state(&mut self, slave: u16) -> Result<u16, NicdrvError> {
         if slave == 0 {
-            let sl_state = host_to_ethercat(u16::from(self.slavelist[usize::from(slave)].state));
+            let sl_state = Ethercat::from_host(u16::from(self.slavelist[usize::from(slave)].state));
             bwr(
                 &mut self.port,
                 0,
                 EthercatRegister::ApplicationLayerControl,
-                &mut sl_state.to_bytes(),
+                &sl_state.to_bytes(),
                 TIMEOUT_RET3,
             )
         } else {
@@ -2999,7 +3005,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 config_address,
                 EthercatRegister::ApplicationLayerControl,
-                host_to_ethercat(u16::from(self.slavelist[usize::from(slave)].state)),
+                Ethercat::from_host(u16::from(self.slavelist[usize::from(slave)].state)),
                 TIMEOUT_RET3,
             )
         }
@@ -3054,7 +3060,7 @@ impl<'context> Context<'context> {
                     &mut word,
                     TIMEOUT_RETURN,
                 )?;
-                ethercat_to_host(Ethercat::<u16>::from_bytes(word))
+                Ethercat::<u16>::from_bytes(word).to_host()
             } else {
                 let mut bytes = [0; 6];
                 fprd(
@@ -3065,8 +3071,8 @@ impl<'context> Context<'context> {
                     TIMEOUT_RETURN,
                 )?;
                 let slstat = ApplicationLayerStatus::read_from(&mut bytes.as_slice())?;
-                self.slavelist[slave_usize].al_status_code = ethercat_to_host(slstat.code);
-                ethercat_to_host(slstat.status)
+                self.slavelist[slave_usize].al_status_code = slstat.code.to_host();
+                slstat.status.to_host()
             };
 
             // Read slave status
@@ -3187,11 +3193,10 @@ impl<'context> Context<'context> {
         // Set eeprom control to master
         self.eeprom_to_master(slave)?;
         let config_address = self.slavelist[usize::from(slave)].config_address;
-        Ok(host_to_ethercat(ethercat_to_host(self.read_eeprom_fp(
-            config_address,
-            eeprom_address,
-            timeout,
-        )?) as u32))
+        Ok(Ethercat::from_host(
+            self.read_eeprom_fp(config_address, eeprom_address, timeout)?
+                .to_host() as u32,
+        ))
     }
 
     /// Write EEPROM to slave bypassing cache.
@@ -3242,7 +3247,7 @@ impl<'context> Context<'context> {
 
         let config_address = self.slavelist[slave_usize].config_address;
 
-        let mut eeprom_control = [2];
+        let eeprom_control = [2];
         let mut error_counter = 0;
 
         // Force eeprom from PDI
@@ -3251,7 +3256,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 config_address,
                 EthercatRegister::EepromConfig.into(),
-                &mut eeprom_control,
+                &eeprom_control,
                 TIMEOUT_RETURN,
             ) else {
                 break;
@@ -3263,7 +3268,7 @@ impl<'context> Context<'context> {
             }
         }
 
-        let mut eeprom_control = [0];
+        let eeprom_control = [0];
         error_counter = 0;
 
         // Set eeprom to master
@@ -3272,7 +3277,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 config_address,
                 EthercatRegister::EepromConfig.into(),
-                &mut eeprom_control,
+                &eeprom_control,
                 TIMEOUT_RETURN,
             ) else {
                 break;
@@ -3306,14 +3311,14 @@ impl<'context> Context<'context> {
         }
 
         let config_address = self.slavelist[usize::from(slave)].config_address;
-        let mut eep_control = [1];
+        let eep_control = [1];
         let mut error_count = 0;
         loop {
             let Err(error) = fpwr(
                 &mut self.port,
                 config_address,
                 EthercatRegister::EepromConfig.into(),
-                &mut eep_control,
+                &eep_control,
                 TIMEOUT_RETURN,
             ) else {
                 break;
@@ -3351,7 +3356,7 @@ impl<'context> Context<'context> {
                 &mut word,
                 TIMEOUT_RETURN,
             ) else {
-                *eeprom_state = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                *eeprom_state = Ethercat::<u16>::from_bytes(word).to_host();
                 if *eeprom_state & EEPROM_STATE_MACHINE_BUSY != 0 || timer.is_expired() {
                     return Ok(*eeprom_state & EEPROM_STATE_MACHINE_BUSY == 0);
                 }
@@ -3399,7 +3404,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 auto_inrecment_address,
                 EthercatRegister::EepromControlStat.into(),
-                &mut host_to_ethercat(eeprom_state).to_bytes(),
+                &Ethercat::from_host(eeprom_state).to_bytes(),
                 TIMEOUT_RET3,
             )?;
         }
@@ -3420,7 +3425,7 @@ impl<'context> Context<'context> {
                     &mut self.port,
                     auto_inrecment_address,
                     EthercatRegister::EepromControlStat.into(),
-                    &mut eeprom_bytes,
+                    &eeprom_bytes,
                     TIMEOUT_RETURN,
                 ) else {
                     break;
@@ -3471,11 +3476,9 @@ impl<'context> Context<'context> {
                             &mut bytes,
                             TIMEOUT_RETURN,
                         ) else {
-                            return Ok(host_to_ethercat(u64::from(ethercat_to_host(Ethercat::<
-                                u32,
-                            >::from_bytes(
-                                bytes
-                            )))));
+                            return Ok(Ethercat::from_host(u64::from(
+                                Ethercat::<u32>::from_bytes(bytes).to_host(),
+                            )));
                         };
                         if retry_count < DEFAULT_RETRIES {
                             retry_count += 1;
@@ -3527,7 +3530,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 auto_inrecment_address,
                 EthercatRegister::EepromControlStat.into(),
-                &mut Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
+                &Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
                 TIMEOUT_RET3,
             )?;
         }
@@ -3540,7 +3543,7 @@ impl<'context> Context<'context> {
                     &mut self.port,
                     auto_inrecment_address,
                     EthercatRegister::EepromData.into(),
-                    &mut data.to_bytes(),
+                    &data.to_bytes(),
                     TIMEOUT_RETURN,
                 ) else {
                     break;
@@ -3565,7 +3568,7 @@ impl<'context> Context<'context> {
                     &mut self.port,
                     auto_inrecment_address,
                     EthercatRegister::EepromControlStat.into(),
-                    &mut eeprom_bytes,
+                    &eeprom_bytes,
                     TIMEOUT_RETURN,
                 ) else {
                     break;
@@ -3617,7 +3620,7 @@ impl<'context> Context<'context> {
                 &mut word,
                 TIMEOUT_RETURN,
             ) else {
-                *eeprom_state = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                *eeprom_state = Ethercat::<u16>::from_bytes(word).to_host();
                 if *eeprom_state & EEPROM_STATE_MACHINE_BUSY == 0 || timer.is_expired() {
                     return Ok(*eeprom_state & EEPROM_STATE_MACHINE_BUSY == 0);
                 }
@@ -3664,7 +3667,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 config_address,
                 EthercatRegister::EepromControlStat.into(),
-                &mut Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
+                &Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
                 TIMEOUT_RET3,
             )?;
         }
@@ -3685,7 +3688,7 @@ impl<'context> Context<'context> {
                     &mut self.port,
                     config_address,
                     EthercatRegister::EepromControlStat.into(),
-                    &mut eeprom_bytes,
+                    &eeprom_bytes,
                     TIMEOUT_RETURN,
                 ) else {
                     break;
@@ -3739,9 +3742,9 @@ impl<'context> Context<'context> {
                         &mut bytes,
                         TIMEOUT_RETURN,
                     ) else {
-                        return Ok(host_to_ethercat(u64::from(ethercat_to_host(
-                            Ethercat::<u32>::from_bytes(bytes),
-                        ))));
+                        return Ok(Ethercat::from_host(u64::from(
+                            Ethercat::<u32>::from_bytes(bytes).to_host(),
+                        )));
                     };
                     if retry_count >= DEFAULT_RETRIES {
                         return Err(error.into());
@@ -3789,7 +3792,7 @@ impl<'context> Context<'context> {
                 &mut self.port,
                 config_address,
                 EthercatRegister::EepromControlStat.into(),
-                &mut Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
+                &Ethercat::from_raw(u16::from(EepromCommand::Nop)).to_bytes(),
                 TIMEOUT_RET3,
             )?;
         }
@@ -3802,7 +3805,7 @@ impl<'context> Context<'context> {
                     &mut self.port,
                     config_address,
                     EthercatRegister::EepromData.into(),
-                    &mut data.to_bytes(),
+                    &data.to_bytes(),
                     TIMEOUT_RETURN,
                 ) else {
                     break;
@@ -3827,7 +3830,7 @@ impl<'context> Context<'context> {
                     &mut self.port,
                     config_address,
                     EthercatRegister::EepromControlStat.into(),
-                    &mut eeprom_bytes,
+                    &eeprom_bytes,
                     TIMEOUT_RETURN,
                 ) else {
                     break;
@@ -3901,7 +3904,7 @@ impl EepromRequest {
                 &mut context.port,
                 config_address,
                 EthercatRegister::EepromControlStat.into(),
-                &mut host_to_ethercat(u16::from(EepromCommand::Nop)).to_bytes(),
+                &Ethercat::from_host(u16::from(EepromCommand::Nop)).to_bytes(),
                 TIMEOUT_RET3,
             )?;
         }
@@ -3920,7 +3923,7 @@ impl EepromRequest {
                 &mut context.port,
                 config_address,
                 EthercatRegister::EepromControlStat.into(),
-                &mut eeprom_bytes,
+                &eeprom_bytes,
                 TIMEOUT_RETURN,
             ) else {
                 return Ok(Self { slave });
@@ -3991,23 +3994,17 @@ struct EmergencyRequest {
     word2: Ethercat<u16>,
 }
 
-impl EmergencyRequest {
-    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+impl<R: Read> ReadFrom<R> for EmergencyRequest {
+    type Err = io::Error;
+
+    fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
-        let mut word = [0; 2];
-        reader.read_exact(&mut word)?;
-        let can_open = Ethercat::<u16>::from_bytes(word);
-        reader.read_exact(&mut word)?;
-        let error_code = Ethercat::<u16>::from_bytes(word);
-        let mut byte = [0];
-        reader.read_exact(&mut byte)?;
-        let error_register = byte[0];
-        reader.read_exact(&mut byte)?;
-        let byte_data = byte[0];
-        reader.read_exact(&mut word)?;
-        let word1 = Ethercat::<u16>::from_bytes(word);
-        reader.read_exact(&mut word)?;
-        let word2 = Ethercat::<u16>::from_bytes(word);
+        let can_open = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let error_code = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let error_register = Self::read_byte(reader)?;
+        let byte_data = Self::read_byte(reader)?;
+        let word1 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let word2 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
         Ok(Self {
             mailbox_header,
             can_open,
@@ -4020,9 +4017,7 @@ impl EmergencyRequest {
     }
 }
 
-pub struct ProcessDataRequest {
-    group: u8,
-}
+pub struct ProcessDataRequest;
 
 impl ProcessDataRequest {
     /// Transmit processdata to slaves.
@@ -4103,7 +4098,7 @@ impl ProcessDataRequest {
                     let word2 = high_word(logical_address);
                     setup_datagram(
                         &mut context.port.tx_buffers_mut()[usize::from(index)],
-                        CommandType::LogicalRead,
+                        ReadCommand::LogicalRead.into(),
                         index,
                         word1,
                         word2,
@@ -4117,12 +4112,12 @@ impl ProcessDataRequest {
                             .config_address;
                         add_datagram(
                             &mut context.port.tx_buffers_mut()[usize::from(index)],
-                            CommandType::LogicalRead,
+                            ReadCommand::LogicalRead.into(),
                             index,
                             false,
                             config_address,
                             EthercatRegister::DistributedClockSystemTime.into(),
-                            &host_to_ethercat(context.dc_time).to_bytes(),
+                            &Ethercat::from_host(context.dc_time).to_bytes(),
                         ) as u16
                     } else {
                         0
@@ -4165,7 +4160,7 @@ impl ProcessDataRequest {
 
                     setup_datagram(
                         &mut context.port.tx_buffers_mut()[usize::from(index)],
-                        CommandType::FixedReadMultipleWrite,
+                        ReadCommand::FixedReadMultipleWrite.into(),
                         index,
                         word1,
                         word2,
@@ -4177,7 +4172,7 @@ impl ProcessDataRequest {
                         // Fixed Pointer Read Multiple Write in second datagram
                         add_datagram(
                             &mut context.port.tx_buffers_mut()[usize::from(index)],
-                            CommandType::FixedReadMultipleWrite,
+                            ReadCommand::FixedReadMultipleWrite.into(),
                             index,
                             false,
                             context.slavelist[usize::from(
@@ -4185,7 +4180,7 @@ impl ProcessDataRequest {
                             )]
                             .config_address,
                             EthercatRegister::DistributedClockSystemTime.into(),
-                            &host_to_ethercat(context.dc_time).to_bytes(),
+                            &Ethercat::from_host(context.dc_time).to_bytes(),
                         ) as u16
                     } else {
                         0
@@ -4233,7 +4228,7 @@ impl ProcessDataRequest {
 
                 setup_datagram(
                     &mut context.port.tx_buffers_mut()[usize::from(index)],
-                    CommandType::LogicalReadWrite,
+                    ReadCommand::LogicalReadWrite.into(),
                     index,
                     word1,
                     word2,
@@ -4246,14 +4241,14 @@ impl ProcessDataRequest {
                     //Fixed Pointer Read Multiple Write in second datagram
                     add_datagram(
                         &mut context.port.tx_buffers_mut()[usize::from(index)],
-                        CommandType::FixedReadMultipleWrite,
+                        ReadCommand::FixedReadMultipleWrite.into(),
                         index,
                         false,
                         context.slavelist
                             [usize::from(context.grouplist[group_usize].dc_next.unwrap())]
                         .config_address,
                         EthercatRegister::DistributedClockSystemTime.into(),
-                        &host_to_ethercat(context.dc_time).to_bytes(),
+                        &Ethercat::from_host(context.dc_time).to_bytes(),
                     ) as u16
                 } else {
                     0
@@ -4283,7 +4278,7 @@ impl ProcessDataRequest {
                 }
             }
         }
-        Ok(Self { group })
+        Ok(Self)
     }
 
     /// Transmit processdata to slaves.
@@ -4389,14 +4384,14 @@ impl ProcessDataRequest {
                 continue;
             };
 
-            let command_type = CommandType::try_from(
+            let command_type = ReadCommand::try_from(
                 context.port.rx_buffers_mut()[usize::from(index)][ETHERCAT_COMMAND_OFFET],
             );
 
             let index_usize = usize::from(index);
             if matches!(
                 command_type,
-                Ok(CommandType::LogicalRead | CommandType::LogicalReadWrite)
+                Ok(ReadCommand::LogicalRead | ReadCommand::LogicalReadWrite)
             ) {
                 if context.index_stack.dc_offset[position_usize] != 0 {
                     context.index_stack.data[position_usize].copy_from_slice(
@@ -4407,13 +4402,13 @@ impl ProcessDataRequest {
                         &context.port.rx_buffers_mut()[index_usize][ETHERCAT_HEADER_SIZE
                             + context.index_stack.data[position_usize].len()..],
                     );
-                    wkc = ethercat_to_host(Ethercat::<u16>::from_bytes(word));
+                    wkc = Ethercat::<u16>::from_bytes(word).to_host();
                     let mut long_word = [0; 8];
                     long_word.copy_from_slice(
                         &context.port.rx_buffers_mut()[index_usize]
                             [usize::from(context.index_stack.dc_offset[position_usize])..],
                     );
-                    context.dc_time = ethercat_to_host(Ethercat::<i64>::from_bytes(long_word));
+                    context.dc_time = Ethercat::<i64>::from_bytes(long_word).to_host();
                 } else {
                     // Copy input data back to process data buffer
                     context.index_stack.data[position_usize].copy_from_slice(
@@ -4422,25 +4417,25 @@ impl ProcessDataRequest {
                     wkc += work_counter2_value;
                 }
                 valid_work_counter = true;
-            } else if context.port.rx_buffers()[usize::from(index)][ETHERCAT_COMMAND_OFFET]
-                == u8::from(CommandType::LogicalWrite)
+            } else if context.port.rx_buffers_mut()[usize::from(index)][ETHERCAT_COMMAND_OFFET]
+                == u8::from(WriteCommand::LogicalWrite)
             {
                 if context.index_stack.dc_offset[usize::from(position)] != 0 {
                     let mut word = [0; ETHERCAT_WORK_COUNTER_SIZE];
                     word.copy_from_slice(
-                        &context.port.rx_buffers()[usize::from(index)][ETHERCAT_HEADER_SIZE
+                        &context.port.rx_buffers_mut()[usize::from(index)][ETHERCAT_HEADER_SIZE
                             + context.index_stack.data[usize::from(position)].len()..],
                     );
 
                     // Output WKC counts 2 times when using logical read write, emulate the same
                     // for logical write.
-                    wkc = ethercat_to_host(Ethercat::<u16>::from_bytes(word)) * 2;
+                    wkc = Ethercat::<u16>::from_bytes(word).to_host() * 2;
                     let mut long = [0; 8];
                     long.copy_from_slice(
-                        &context.port.rx_buffers()[usize::from(index)]
+                        &context.port.rx_buffers_mut()[usize::from(index)]
                             [usize::from(context.index_stack.dc_offset[usize::from(position)])..],
                     );
-                    context.dc_time = ethercat_to_host(Ethercat::<i64>::from_bytes(long));
+                    context.dc_time = Ethercat::<i64>::from_bytes(long).to_host();
                 } else {
                     // Output WKC counts 2 times when using Logical Read/Write, emulate the same
                     // for Logical Write.
@@ -4489,7 +4484,7 @@ fn fixed_pointer_read_multi(
     let mut sl_count: u16 = 0;
     setup_datagram(
         &mut port.tx_buffers_mut()[usize::from(index)],
-        CommandType::FixedPointerRead,
+        ReadCommand::FixedPointerRead.into(),
         index,
         config_list[usize::from(sl_count)],
         EthercatRegister::ApplicationLayerStatus.into(),
@@ -4501,7 +4496,7 @@ fn fixed_pointer_read_multi(
     for sl_count in sl_count..number - 1 {
         sl_data_position[usize::from(sl_count)] = add_datagram(
             &mut port.tx_buffers_mut()[usize::from(index)],
-            CommandType::FixedPointerRead,
+            ReadCommand::FixedPointerRead.into(),
             index,
             true,
             config_list[usize::from(sl_count)],
@@ -4513,7 +4508,7 @@ fn fixed_pointer_read_multi(
     if sl_count < number {
         sl_data_position[usize::from(sl_count)] = add_datagram(
             &mut port.tx_buffers_mut()[usize::from(index)],
-            CommandType::FixedPointerRead,
+            ReadCommand::FixedPointerRead.into(),
             index,
             false,
             config_list[usize::from(sl_count)],

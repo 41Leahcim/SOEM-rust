@@ -5,7 +5,8 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::module_name_repetitions,
-    clippy::must_use_candidate
+    clippy::must_use_candidate,
+    dead_code
 )]
 
 pub mod ethercat;
