@@ -26,10 +26,6 @@ use std::{
     array, io,
     mem::zeroed,
     ptr::{self, NonNull},
-    sync::{
-        atomic::{AtomicI32, Ordering},
-        Arc, Mutex, MutexGuard,
-    },
     time::Duration,
 };
 
@@ -42,7 +38,7 @@ use crate::{
         ReadFrom,
     },
     osal::OsalTimer,
-    safe_c::{CError, CloseError},
+    safe_c::CError,
 };
 
 use super::Network;
@@ -75,15 +71,6 @@ impl From<io::Error> for NicdrvError {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum RedundancyMode {
-    /// No redundancy, single NIC mode
-    None,
-
-    /// Double redundant NIC connection
-    Double,
-}
-
 /// Primary MAC address used for EtherCAT.
 /// THis address is not the MAC address used from the NIC.
 /// EtherCAT doesn't care about MAC addressing, but it is used here to
@@ -99,107 +86,156 @@ pub const SECONDARY_MAC: [u16; 3] = [0x404, 0x404, 0x404];
 const RX_PRIMARY: u16 = PRIMARY_MAC[1];
 const RX_SECONDARY: u16 = SECONDARY_MAC[1];
 
-/// Sets all buffer statuses to empty
-fn ecx_clear_rx_buffer_status(rx_buffer_status: &mut [BufferState]) {
-    rx_buffer_status
-        .iter_mut()
-        .for_each(|value| *value = BufferState::Empty);
+pub struct RxBuffer {
+    data: Buffer,
+    state: BufferState,
+}
+
+impl Default for RxBuffer {
+    fn default() -> Self {
+        Self {
+            data: Buffer::default(),
+            state: BufferState::Empty,
+        }
+    }
+}
+
+impl RxBuffer {
+    pub const fn data(&self) -> &Buffer {
+        &self.data
+    }
+
+    pub fn data_mut(&mut self) -> &mut Buffer {
+        &mut self.data
+    }
+
+    pub fn set_state(&mut self, state: BufferState) {
+        self.state = state;
+    }
+
+    pub const fn state(&self) -> BufferState {
+        self.state
+    }
 }
 
 /// EtherCAT Pointer structure to Tx and Rx stacks
-pub struct Stack<'stack> {
-    /// Socket connection used
-    socket: Arc<AtomicI32>,
-
+pub struct Stack {
     /// Send buffers
-    tx_buffer: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
+    tx_buffer: [Buffer; MAX_BUFFER_COUNT],
 
-    /// Temporary receive buffer
-    temp_buf: &'stack Mutex<Buffer>,
+    /// Temporary send buffer
+    temp_tx_buf: usize,
 
-    /// Rreceive buffers
-    rx_buffers: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
+    /// Receive buffers
+    rx_buffers: [RxBuffer; MAX_BUFFER_COUNT],
+    temp_rx_buf: usize,
+}
 
-    /// Receive buffer status fields
-    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUFFER_COUNT]>>,
+impl Stack {
+    pub const fn tx_buffers(&self) -> &[Buffer; MAX_BUFFER_COUNT] {
+        &self.tx_buffer
+    }
 
-    /// Received MAC source address (middle word)
-    rx_source_address: Arc<Mutex<[i32; MAX_BUFFER_COUNT]>>,
+    pub const fn temp_tx_buf(&self) -> &Buffer {
+        &self.tx_buffers()[self.temp_tx_buf]
+    }
+
+    pub fn tx_buffers_mut(&mut self) -> &mut [Buffer; MAX_BUFFER_COUNT] {
+        &mut self.tx_buffer
+    }
+
+    pub fn temp_tx_buf_mut(&mut self) -> &mut Buffer {
+        let index = self.temp_tx_buf;
+        &mut self.tx_buffers_mut()[index]
+    }
+
+    pub const fn rx_buffers(&self) -> &[RxBuffer; MAX_BUFFER_COUNT] {
+        &self.rx_buffers
+    }
+
+    pub const fn temp_rx_buf(&self) -> &RxBuffer {
+        &self.rx_buffers[self.temp_rx_buf]
+    }
+
+    pub fn rx_buffers_mut(&mut self) -> &mut [RxBuffer; MAX_BUFFER_COUNT] {
+        &mut self.rx_buffers
+    }
+
+    pub fn temp_rx_buf_mut(&mut self) -> &mut RxBuffer {
+        &mut self.rx_buffers[self.temp_rx_buf]
+    }
+}
+
+impl Default for Stack {
+    fn default() -> Self {
+        Self {
+            tx_buffer: [const { heapless::Vec::new() }; MAX_BUFFER_COUNT],
+            temp_tx_buf: 0,
+            rx_buffers: array::from_fn(|_| RxBuffer::default()),
+            temp_rx_buf: 0,
+        }
+    }
 }
 
 /// EtherCAT eXtended Pointer structure to buffers for redundant port
-pub struct RedPort<'redport> {
-    stack: Stack<'redport>,
-    sockhandle: Arc<AtomicI32>,
-
-    /// Receive buffers
-    rx_buf: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
-
-    /// Receive buffer status
-    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUFFER_COUNT]>>,
+pub struct RedPort {
+    stack: Stack,
+    sockhandle: i32,
 
     /// Receive MAC source address
-    rx_source_address: Arc<Mutex<[i32; MAX_BUFFER_COUNT]>>,
+    rx_source_address: [i32; MAX_BUFFER_COUNT],
+}
 
-    temp_in_buf: &'redport Mutex<Buffer>,
+impl RedPort {
+    /// # Errors
+    /// Returns an error on failure to initialize a new socket.
+    pub fn new(interface_name: &str) -> Result<Self, CError> {
+        Ok(Self {
+            stack: Stack::default(),
+            sockhandle: initialize_socket(interface_name)?,
+            rx_source_address: [0; MAX_BUFFER_COUNT],
+        })
+    }
+}
+
+impl Drop for RedPort {
+    fn drop(&mut self) {
+        use crate::safe_c::close;
+        close(self.sockhandle).unwrap();
+    }
 }
 
 /// Ethercat eXtended pointer structure to buffers, variables, and mutexes for port instantiation
-pub struct Port<'port> {
-    stack: Stack<'port>,
-    sockhandle: Arc<AtomicI32>,
-
-    /// Rx buffers
-    rx_buffers: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
-
-    /// Receive buffer status
-    rx_buf_stat: Arc<Mutex<[BufferState; MAX_BUFFER_COUNT]>>,
+pub struct Port {
+    stack: Stack,
+    sockhandle: i32,
 
     /// Receive MAC source address
-    rx_source_address: Arc<Mutex<[i32; MAX_BUFFER_COUNT]>>,
-
-    /// Temporary receive buffer
-    temp_in_buf: &'port Mutex<Buffer>,
-
-    /// Temporary receive buffer status
-    temp_in_buf_stat: BufferState,
-
-    /// Transmit buffers
-    tx_buffers: Arc<Mutex<[Buffer; MAX_BUFFER_COUNT]>>,
-
-    /// Temporary send buffer
-    temp_tx_buffer: &'port Mutex<Buffer>,
+    rx_source_address: [i32; MAX_BUFFER_COUNT],
 
     /// last used frame index
     last_index: usize,
 
-    /// Current redundancy state
-    redstate: RedundancyMode,
-
-    redport: Option<RedPort<'port>>,
+    redport: Option<RedPort>,
 }
 
-impl<'port> Port<'port> {
-    /// # Panics
-    /// Will panic if the `tx_buffers` mutex is poisoned.
-    pub fn tx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUFFER_COUNT]> {
-        self.tx_buffers.lock().unwrap()
+#[derive(Debug, Clone, Copy)]
+pub enum RedundancyMode<'red> {
+    None,
+    Redundant(&'red str),
+}
+
+impl Port {
+    pub const fn stack(&self) -> &Stack {
+        &self.stack
     }
 
-    /// # Panics
-    /// Will panic if the `rx_buffers` mutex is poisoned.
-    pub fn rx_buffers_mut(&mut self) -> MutexGuard<[Buffer; MAX_BUFFER_COUNT]> {
-        self.rx_buffers.lock().unwrap()
+    pub fn stack_mut(&mut self) -> &mut Stack {
+        &mut self.stack
     }
 
-    pub fn set_red_port(&mut self, red_port: RedPort<'port>) {
+    pub fn set_red_port(&mut self, red_port: RedPort) {
         self.redport = Some(red_port);
-    }
-
-    /// # Panics
-    /// Will panic if the `tx_buffers` mutex is poisoned.
-    pub fn temp_tx_buffer(&self) -> MutexGuard<Buffer> {
-        self.temp_tx_buffer.lock().unwrap()
     }
 
     /// Basic setup connect NIC to socket.
@@ -207,7 +243,7 @@ impl<'port> Port<'port> {
     /// # Parameters
     /// - `self`: port context struct
     /// - `interface_name`: Name of NIC device, f.e. "eth0"
-    /// - `secondary`: if > 0, use secondary stack instead of primary
+    /// - `redundant`: if true, add redundant port
     ///
     /// # Panics
     /// Panics if:
@@ -216,78 +252,28 @@ impl<'port> Port<'port> {
     ///
     /// # Errors
     /// Returns an error if the socket couldn't be initialized.
-    pub fn setup_nic(&mut self, interface_name: &str, secondary: bool) -> Result<(), NicdrvError> {
-        let psock;
-        if secondary {
-            // Check whether a secondary port is available and initialize it
-            if let Some(redport) = &mut self.redport {
-                redport.sockhandle.store(-1, Ordering::Relaxed);
-                self.redstate = RedundancyMode::Double;
-                redport.stack.socket = self.sockhandle.clone();
-                redport.stack.temp_buf = self.temp_tx_buffer;
-                redport.stack.rx_buffers = redport.rx_buf.clone();
-                redport.stack.rx_source_address = redport.rx_source_address.clone();
-                ecx_clear_rx_buffer_status(&mut redport.rx_buf_stat.lock().unwrap()[..1]);
-                psock = &redport.sockhandle;
-            } else {
-                // Fail
-                return Err(NicdrvError::MissingRedportInSecondaryNicSetup);
-            }
+    pub fn setup_nic(
+        interface_name: &str,
+        redundancy_mode: RedundancyMode,
+    ) -> Result<Self, NicdrvError> {
+        let redport = if let RedundancyMode::Redundant(interface_name) = redundancy_mode {
+            Some(RedPort::new(interface_name)?)
         } else {
-            self.sockhandle.store(-1, Ordering::Relaxed);
-            self.last_index = 0;
-            self.redstate = RedundancyMode::None;
-            self.stack.socket = self.sockhandle.clone();
-            self.stack.tx_buffer = self.tx_buffers.clone();
-            self.stack.temp_buf = self.temp_in_buf;
-            self.stack.rx_buffers = self.rx_buffers.clone();
-            self.stack.rx_buf_stat = self.rx_buf_stat.clone();
-            self.stack.rx_source_address = self.rx_source_address.clone();
-            ecx_clear_rx_buffer_status(&mut self.rx_buf_stat.lock().unwrap()[..1]);
-            psock = &self.sockhandle;
-        }
-        psock.store(initialize_socket(interface_name)?, Ordering::Relaxed);
+            None
+        };
+        let mut result = Self {
+            stack: Stack::default(),
+            sockhandle: initialize_socket(interface_name)?,
+            rx_source_address: [0; MAX_BUFFER_COUNT],
+            last_index: 0,
+            redport,
+        };
 
         let header = EthernetHeader::new(PRIMARY_MAC);
-        for (tx_buf, rx_buf_stat) in self
-            .tx_buffers
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .zip(self.rx_buf_stat.lock().unwrap().iter_mut())
-        {
-            tx_buf.clear();
+        for tx_buf in result.stack_mut().tx_buffers_mut().iter_mut() {
             tx_buf.extend_from_slice(&header.bytes()?).unwrap();
-            *rx_buf_stat = BufferState::Empty;
         }
-        let mut temp_tx_buffer = self.temp_tx_buffer.lock().unwrap();
-        temp_tx_buffer.clear();
-        temp_tx_buffer.extend_from_slice(&header.bytes()?).unwrap();
-        Ok(())
-    }
-
-    /// Close sockets used
-    ///
-    /// # Parameters
-    /// - `self`: port context struct
-    ///
-    /// # Errors
-    /// Returns an error if a socket couldn't be closed.
-    pub fn close_nic(&mut self) -> Result<(), CloseError> {
-        use crate::safe_c::close;
-        if self.sockhandle.load(Ordering::Relaxed) >= 0 {
-            close(self.sockhandle.load(Ordering::Relaxed))?;
-            self.sockhandle.store(0, Ordering::Relaxed);
-        }
-        if let Some(sockhandle) = self
-            .redport
-            .as_ref()
-            .map(|redport| redport.sockhandle.as_ref())
-        {
-            close(sockhandle.load(Ordering::Relaxed))?;
-            sockhandle.store(0, Ordering::Relaxed);
-        }
-        Ok(())
+        Ok(result)
     }
 
     /// Set rx buffer status
@@ -300,13 +286,9 @@ impl<'port> Port<'port> {
     /// # Panics
     /// Panics if the buffer state mutex of the port or redundant port couldn't be locked.
     pub fn set_buf_stat(&mut self, index: usize, bufstat: BufferState) {
-        self.rx_buf_stat.lock().unwrap()[index] = bufstat;
-        if let Some(redport) = self
-            .redport
-            .as_mut()
-            .filter(|_| self.redstate != RedundancyMode::None)
-        {
-            redport.rx_buf_stat.lock().unwrap()[index] = bufstat;
+        self.stack.rx_buffers[index].state = bufstat;
+        if let Some(redport) = self.redport.as_mut() {
+            redport.stack.rx_buffers[index].state = bufstat;
         }
     }
 
@@ -326,29 +308,49 @@ impl<'port> Port<'port> {
         if index >= MAX_BUFFER_COUNT {
             index = 0;
         }
-        let mut rx_buf_stat = self.rx_buf_stat.lock().unwrap();
+        let rx_buf = &mut self.stack.rx_buffers;
         let index = (index..)
             .take(MAX_BUFFER_COUNT)
-            .zip(rx_buf_stat.iter().skip(index))
-            .find(|&(_, rx_buf_stat)| *rx_buf_stat == BufferState::Empty)
+            .zip(rx_buf.iter().skip(index))
+            .find(|&(_, rx_buf)| rx_buf.state == BufferState::Empty)
             .map_or(index, |(index, _)| index);
-        rx_buf_stat[index] = BufferState::Alloc;
-        if let Some(redport) = self
-            .redport
-            .as_mut()
-            .filter(|_| self.redstate != RedundancyMode::None)
-        {
-            redport.rx_buf_stat.lock().unwrap()[index] = BufferState::Alloc;
+        rx_buf[index].state = BufferState::Alloc;
+        if let Some(redport) = self.redport.as_mut() {
+            redport.stack.rx_buffers[index].state = BufferState::Alloc;
         }
 
         index as u8
     }
 
-    fn get_stack(&self, stacknumber: i32) -> &Stack {
-        if let Some(redport) = self.redport.as_ref().filter(|_| stacknumber == 0) {
+    fn get_stack_mut(&mut self, secondary: bool) -> &mut Stack {
+        if let Some(redport) = self.redport.as_mut().filter(|_| secondary) {
+            &mut redport.stack
+        } else {
+            &mut self.stack
+        }
+    }
+
+    fn get_stack(&self, secondary: bool) -> &Stack {
+        if let Some(redport) = self.redport.as_ref().filter(|_| secondary) {
             &redport.stack
         } else {
             &self.stack
+        }
+    }
+
+    fn get_socket(&self, secondary: bool) -> i32 {
+        if let Some(redport) = self.redport.as_ref().filter(|_| secondary) {
+            redport.sockhandle
+        } else {
+            self.sockhandle
+        }
+    }
+
+    fn rx_source_address_mut(&mut self, secondary: bool) -> &mut [i32; MAX_BUFFER_COUNT] {
+        if let Some(redport) = self.redport.as_mut().filter(|_| secondary) {
+            &mut redport.rx_source_address
+        } else {
+            &mut self.rx_source_address
         }
     }
 
@@ -357,28 +359,22 @@ impl<'port> Port<'port> {
     /// # Parameters
     /// - `self`: port context struct
     /// - `index`: index in tx buffer array
-    /// - `stacknumber`: 0=primary, 1=secondary (if available)
+    /// - `secondary`: false=primary, true=secondary (if available)
     ///
     /// # Panics
     /// Panics if the mutex of the rx_buf_stat of the requested stack couldn't be locked
     ///
     /// # Returns
     /// Socket send result
-    pub fn out_frame(&mut self, index: usize, stacknumber: i32) -> i32 {
-        let stack = self.get_stack(stacknumber);
-        stack.rx_buf_stat.lock().unwrap()[index] = BufferState::Tx;
-        let tx_buffer = stack.tx_buffer.lock().unwrap();
+    pub fn out_frame(&mut self, index: usize, secondary: bool) -> i32 {
+        let socket = self.get_socket(secondary);
+        let stack = self.get_stack_mut(secondary);
+        stack.rx_buffers[index].state = BufferState::Tx;
+        let tx_buffer = &mut stack.tx_buffer;
         let buffer: &[u8] = tx_buffer[index].as_ref();
-        let rval = unsafe {
-            libc::send(
-                stack.socket.load(Ordering::Relaxed),
-                ptr::from_ref(buffer).cast(),
-                buffer.len(),
-                0,
-            )
-        };
+        let rval = unsafe { libc::send(socket, ptr::from_ref(buffer).cast(), buffer.len(), 0) };
         if rval == -1 {
-            stack.rx_buf_stat.lock().unwrap()[index] = BufferState::Empty;
+            stack.rx_buffers[index].state = BufferState::Empty;
         }
 
         rval as i32
@@ -402,21 +398,20 @@ impl<'port> Port<'port> {
     /// # Returns
     /// Socket send result
     pub fn out_frame_red(&mut self, index: u8) -> Result<i32, NicdrvError> {
-        let mut ehp = EthernetHeader::read_from(
-            &mut self.tx_buffers.lock().unwrap()[usize::from(index)].as_slice(),
-        )?;
+        let mut ehp =
+            EthernetHeader::read_from(&mut self.stack.tx_buffer[usize::from(index)].as_slice())?;
 
         // Rewrite MAC source address 1 to primary
         ehp.source_address_mut()[1] = Network::from_host(PRIMARY_MAC[1]);
-        self.tx_buffers.lock().unwrap()[usize::from(index)]
+        self.stack.tx_buffer[usize::from(index)]
             .as_mut_slice()
             .copy_from_slice(&ehp.bytes()?);
 
         // Transmit over primary socket
-        let rval = self.out_frame(index.into(), 0);
+        let rval = self.out_frame(index.into(), false);
 
-        if self.redstate != RedundancyMode::None {
-            let mut tmp_buffer = self.temp_tx_buffer.lock().unwrap();
+        if self.redport.is_some() {
+            let tmp_buffer = &mut self.stack.tx_buffer[self.stack.temp_tx_buf];
             let mut ehp = EthernetHeader::read_from(&mut tmp_buffer.as_slice())?;
 
             // Use dummy frame for secondary socket transmit (BRD)
@@ -432,18 +427,18 @@ impl<'port> Port<'port> {
             tmp_buffer[EthernetHeader::size()..].copy_from_slice(&datagram.bytes()?);
 
             // Transmit over secondary socket
-            let redport = self.redport.as_ref().unwrap();
-            redport.rx_buf_stat.lock().unwrap()[usize::from(index)] = BufferState::Tx;
+            let redport = self.redport.as_mut().unwrap();
+            redport.stack.rx_buffers[usize::from(index)].state = BufferState::Tx;
             if unsafe {
                 libc::send(
-                    redport.sockhandle.load(Ordering::Relaxed),
+                    redport.sockhandle,
                     tmp_buffer.as_ptr().cast(),
                     tmp_buffer.len(),
                     0,
                 )
             } == -1
             {
-                redport.rx_buf_stat.lock().unwrap()[usize::from(index)] = BufferState::Empty;
+                redport.stack.rx_buffers[usize::from(index)].state = BufferState::Empty;
             }
         }
         Ok(rval)
@@ -453,28 +448,29 @@ impl<'port> Port<'port> {
     ///
     /// # Parameters
     /// - `self`: port context struct
-    /// - `stacknumber`: 0=primary 1=secondary stack (if available)
+    /// - `secondary`: false=primary true=secondary stack (if available)
     ///
     /// # Panics
     /// Panics if the mutex of the `temp_buf` of the selected stack couldn't be locked.
-    pub fn receive_packet(&mut self, stacknumber: i32) -> i32 {
-        let stack = self.get_stack(stacknumber);
-        let mut temp_buf = stack.temp_buf.lock().unwrap();
+    pub fn receive_packet(&mut self, secondary: bool) -> bool {
+        let socket = self.get_socket(secondary);
+        let temp_rx_buffer = self.stack.temp_rx_buf;
+        let stack = self.get_stack_mut(secondary);
+        let temp_buf = &mut stack.rx_buffers[temp_rx_buffer];
         let bytesrx = unsafe {
             libc::recv(
-                stack.socket.load(Ordering::Relaxed),
-                temp_buf.as_mut_ptr().cast(),
-                temp_buf.len(),
+                socket,
+                temp_buf.data.as_mut_ptr().cast(),
+                temp_buf.data.len(),
                 0,
             )
         };
-        drop(temp_buf);
-        self.temp_in_buf_stat = if bytesrx == 0 {
+        self.stack.rx_buffers[self.stack.temp_rx_buf].state = if bytesrx == 0 {
             BufferState::Empty
         } else {
             BufferState::Alloc
         };
-        i32::from(bytesrx > 0)
+        bytesrx > 0
     }
 
     /// Non blocking receive frame function. Uses RX buffer and index to combine
@@ -492,7 +488,7 @@ impl<'port> Port<'port> {
     /// # Parameters
     /// - `self`: port context struct
     /// - `index`: requested index of frame
-    /// - `stacknumber`: 0=primary, 1=secondary stack (if available)
+    /// - `secondary`: false=primary, true=secondary stack (if available)
     ///
     /// # Panics
     /// Panics if:
@@ -506,36 +502,30 @@ impl<'port> Port<'port> {
     ///
     /// # Returns
     /// Workcounter if a frame is found with corresponding index, otherwise error
-    pub fn inframe(&mut self, index: u8, stacknumber: i32) -> Result<u16, NicdrvError> {
+    pub fn inframe(&mut self, index: u8, secondary: bool) -> Result<u16, NicdrvError> {
         let mut rval = Err(NicdrvError::NoFrame);
 
         // Check if requested index is already in buffer
         if usize::from(index) < MAX_BUFFER_COUNT
-            && self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()[usize::from(index)]
-                != BufferState::Rcvd
+            && self.get_stack(secondary).rx_buffers[usize::from(index)].state != BufferState::Rcvd
         {
-            let rxbuf = self.get_stack(stacknumber).rx_buffers.lock().unwrap();
-            let rxbuf = rxbuf[usize::from(index)].as_slice();
+            let rxbuf = &self.get_stack(secondary).rx_buffers;
+            let rxbuf = rxbuf[usize::from(index)].data.as_slice();
             let l = usize::from(rxbuf[0]) + ((usize::from(rxbuf[1]) & 0xF) << 8);
 
             // Return WKC
             rval = Ok(u16::from(rxbuf[l]) + (u16::from(rxbuf[l + 1]) << 8));
-            self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()[usize::from(index)] =
+            self.get_stack_mut(secondary).rx_buffers[usize::from(index)].state =
                 BufferState::Complete;
-        } else if self.receive_packet(stacknumber) != 0 {
+        } else if self.receive_packet(secondary) {
             rval = Err(NicdrvError::OtherFrame);
-            let ethernetp = EthernetHeader::read_from(
-                &mut self
-                    .get_stack(stacknumber)
-                    .temp_buf
-                    .lock()
-                    .unwrap()
-                    .as_slice(),
-            )?;
+            let stack = self.get_stack_mut(secondary);
+            let temp_buf = stack.temp_rx_buf;
+            let ethernetp =
+                EthernetHeader::read_from(&mut stack.rx_buffers[temp_buf].data.as_slice())?;
             if ethernetp.ethernet_type() == Network::from_host(ETH_P_ECAT) {
                 let ethercatp = EthercatHeader::read_from(
-                    &mut &self.get_stack(stacknumber).temp_buf.lock().unwrap()
-                        [EthernetHeader::size()..],
+                    &mut &stack.rx_buffers[temp_buf].data[EthernetHeader::size()..],
                 )?;
                 let l = usize::from(ethercatp.ethercat_length().to_host() & 0x0FFF);
                 let index_found = ethercatp.index();
@@ -543,43 +533,52 @@ impl<'port> Port<'port> {
                 // Check whether the index is the index we're looking for
                 if index_found == index {
                     // Put it in the buffer
-                    let stack = self.get_stack(stacknumber);
-                    let rx_buf = &mut stack.rx_buffers.lock().unwrap()[usize::from(index)];
-                    rx_buf.clear();
-                    rx_buf
-                        .extend_from_slice(
-                            &stack.temp_buf.lock().unwrap()[EthernetHeader::size()..],
-                        )
+                    let stack = self.get_stack_mut(secondary);
+                    let (src, rx_buffer) = if usize::from(index) < temp_buf {
+                        let (left, right) = stack.rx_buffers.split_at_mut(temp_buf);
+                        (&mut right[0], &mut left[usize::from(index)])
+                    } else {
+                        let (left, right) = stack.rx_buffers.split_at_mut(usize::from(index));
+                        (&mut left[temp_buf], &mut right[0])
+                    };
+                    rx_buffer.data.clear();
+                    rx_buffer
+                        .data
+                        .extend_from_slice(&src.data[EthernetHeader::size()..])
                         .unwrap();
 
                     // Return WKC
-                    rval = Ok(u16::from(rx_buf[l]) + (u16::from(rx_buf[l + 1])));
+                    rval = Ok(u16::from(rx_buffer.data[l]) + (u16::from(rx_buffer.data[l + 1])));
 
                     // Mark as completed
-                    stack.rx_buf_stat.lock().unwrap()[usize::from(index)] = BufferState::Complete;
-                    stack.rx_source_address.lock().unwrap()[usize::from(index)] =
+                    stack.rx_buffers[usize::from(index)].state = BufferState::Complete;
+                    self.rx_source_address_mut(secondary)[usize::from(index)] =
                         ethernetp.source_address()[1].to_host().into();
                 } else if usize::from(index_found) < MAX_BUFFER_COUNT
-                    && self.get_stack(stacknumber).rx_buf_stat.lock().unwrap()
-                        [usize::from(index_found)]
+                    && self.get_stack(secondary).rx_buffers[usize::from(index_found)].state
                         == BufferState::Tx
                 {
                     // If the index exists and someone is waiting for it
 
-                    let stack = self.get_stack(stacknumber);
+                    let stack = self.get_stack_mut(secondary);
 
                     // Put it in the buffer array
-                    let rx_buf = &mut stack.rx_buffers.lock().unwrap()[usize::from(index_found)];
-                    rx_buf.clear();
-                    rx_buf
-                        .extend_from_slice(
-                            &stack.temp_buf.lock().unwrap()[EthernetHeader::size()..],
-                        )
+                    let (src, rx_buffer) = if usize::from(index_found) < temp_buf {
+                        let (left, right) = stack.rx_buffers.split_at_mut(temp_buf);
+                        (&mut right[0], &mut left[usize::from(index_found)])
+                    } else {
+                        let (left, right) = stack.rx_buffers.split_at_mut(usize::from(index_found));
+                        (&mut left[temp_buf], &mut right[0])
+                    };
+                    rx_buffer.data.clear();
+                    rx_buffer
+                        .data
+                        .extend_from_slice(&src.data[EthernetHeader::size()..])
                         .unwrap();
 
                     // Mark as received
-                    stack.rx_buf_stat.lock().unwrap()[usize::from(index_found)] = BufferState::Rcvd;
-                    stack.rx_source_address.lock().unwrap()[usize::from(index_found)] =
+                    stack.rx_buffers[usize::from(index_found)].state = BufferState::Rcvd;
+                    self.rx_source_address_mut(secondary)[usize::from(index_found)] =
                         ethernetp.source_address()[1].to_host().into();
                 }
             }
@@ -608,7 +607,7 @@ impl<'port> Port<'port> {
     /// Workcounter if a frame is found with corresponding index, otherwise `NicdrvError`
     fn wait_in_frame_red(&mut self, index: u8, timer: &OsalTimer) -> Result<u16, NicdrvError> {
         // If not in redundant mode, always assume secondary is ok
-        let mut wkc2 = if self.redstate == RedundancyMode::None {
+        let mut wkc2 = if self.redport.is_none() {
             Ok(0)
         } else {
             Err(NicdrvError::NoFrame)
@@ -618,12 +617,12 @@ impl<'port> Port<'port> {
         loop {
             // Only read frame if not already in
             if wkc.is_err() {
-                wkc = self.inframe(index, 0);
+                wkc = self.inframe(index, false);
             }
 
             // Only try secondary if in redundant mode and not already in
-            if self.redstate != RedundancyMode::None && wkc2.is_err() {
-                wkc2 = self.inframe(index, 1);
+            if self.redport.is_some() && wkc2.is_err() {
+                wkc2 = self.inframe(index, true);
             }
 
             // Wait for both frames to arrive or timeout
@@ -633,20 +632,20 @@ impl<'port> Port<'port> {
         }
 
         // Only do redundant functions when in redundant mode
-        if self.redstate == RedundancyMode::None {
+        if self.redport.is_none() {
             return wkc;
         }
 
         // primrx if the received MAC source on the primary socket
         let primrx = if wkc.is_ok() {
-            self.rx_source_address.lock().unwrap()[usize::from(index)]
+            self.rx_source_address[usize::from(index)]
         } else {
             0
         };
 
         // Secrx if the received MAC source on psecondary socket
         let secrx = if let Some(redport) = self.redport.as_ref().filter(|_| wkc2.is_ok()) {
-            redport.rx_source_address.lock().unwrap()[usize::from(index)]
+            redport.rx_source_address[usize::from(index)]
         } else {
             0
         };
@@ -654,14 +653,12 @@ impl<'port> Port<'port> {
         // Primary socket got secondary frame and secondary socket got primary frame
         if primrx == RX_SECONDARY.into() && secrx == RX_PRIMARY.into() {
             // Copy secondary buffer to primary
-            let rxbuf = &mut self.rx_buffers.lock().unwrap()[usize::from(index)];
+            let received_data = self.redport.as_ref().unwrap().stack.rx_buffers[usize::from(index)]
+                .data
+                .clone();
+            let rxbuf = &mut self.stack_mut().rx_buffers[usize::from(index)].data;
             rxbuf.clear();
-            rxbuf
-                .extend_from_slice(
-                    self.redport.as_ref().unwrap().rx_buf.lock().unwrap()[usize::from(index)]
-                        .as_slice(),
-                )
-                .unwrap();
+            rxbuf.extend_from_slice(&received_data).unwrap();
         }
 
         // Primary socket got nothing or primary frame, and secondary socket got secondary frame.
@@ -673,31 +670,29 @@ impl<'port> Port<'port> {
             // received frame over the secondary socket. The result from the secondary received
             // frame is a combined frame that traversed all slaves in standard order.
             if primrx == RX_PRIMARY.into() && secrx == RX_SECONDARY.into() {
-                let tx_buf = &mut self.tx_buffers.lock().unwrap()[usize::from(index)];
+                let received_data = self.stack.rx_buffers[usize::from(index)].data.clone();
+                let tx_buf = &mut self.stack.tx_buffers_mut()[usize::from(index)];
                 tx_buf.resize(EthernetHeader::size(), 0).unwrap();
-                tx_buf
-                    .extend_from_slice(
-                        self.rx_buffers.lock().unwrap()[usize::from(index)].as_slice(),
-                    )
-                    .unwrap();
+                tx_buf.extend_from_slice(&received_data).unwrap();
             }
             let timer2 = OsalTimer::new(TIMEOUT_RETURN);
 
             // Resend secondary tx
-            self.out_frame(usize::from(index), 1);
+            self.out_frame(usize::from(index), true);
 
             loop {
-                wkc2 = self.inframe(index, 1);
+                wkc2 = self.inframe(index, true);
                 if wkc2.is_ok() || timer2.is_expired() {
                     break;
                 }
             }
             if wkc2.is_ok() {
-                let rx_buf = &mut self.rx_buffers.lock().unwrap()[usize::from(index)];
+                let rx_buf = &mut self.stack.rx_buffers[usize::from(index)].data;
                 rx_buf.clear();
                 rx_buf
                     .extend_from_slice(
-                        self.redport.as_ref().unwrap().rx_buf.lock().unwrap()[usize::from(index)]
+                        self.redport.as_ref().unwrap().stack.rx_buffers[usize::from(index)]
+                            .data()
                             .as_slice(),
                     )
                     .unwrap();
@@ -756,6 +751,13 @@ impl<'port> Port<'port> {
                 break wkc;
             }
         }
+    }
+}
+
+impl Drop for Port {
+    fn drop(&mut self) {
+        use crate::safe_c::close;
+        close(self.sockhandle).unwrap();
     }
 }
 

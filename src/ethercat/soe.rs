@@ -2,6 +2,7 @@
 
 use std::{
     io::{self, Read, Write},
+    str::FromStr,
     time::Duration,
 };
 
@@ -87,6 +88,28 @@ pub struct Name {
     value: heapless::String<MAX_NAME_LENGTH>,
 }
 
+impl Name {
+    pub fn new(current_length: u16, max_length: u16, value: &str) -> Option<Self> {
+        heapless::String::from_str(value).ok().map(|value| Self {
+            current_length,
+            max_length,
+            value,
+        })
+    }
+
+    pub const fn length(&self) -> u16 {
+        self.current_length
+    }
+
+    pub const fn capacity(&self) -> u16 {
+        self.max_length
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
 pub enum ListValue {
     Byte([u8; 8]),
     Word([u16; 4]),
@@ -103,6 +126,28 @@ pub struct List {
     max_length: u16,
 
     data: ListValue,
+}
+
+impl List {
+    pub const fn new(length: u16, max_length: u16, data: ListValue) -> Self {
+        Self {
+            current_length: length,
+            max_length,
+            data,
+        }
+    }
+
+    pub const fn length(&self) -> u16 {
+        self.current_length
+    }
+
+    pub const fn capacity(&self) -> u16 {
+        self.max_length
+    }
+
+    pub const fn data(&self) -> &ListValue {
+        &self.data
+    }
 }
 
 /// SoE IDN mapping
@@ -289,7 +334,7 @@ enum SoEValue {
 impl SoEValue {
     const fn inner(&self) -> Ethercat<u16> {
         match self {
-            SoEValue::Idn(ethercat) | SoEValue::FragmentsLeft(ethercat) => *ethercat,
+            Self::Idn(ethercat) | Self::FragmentsLeft(ethercat) => *ethercat,
         }
     }
 }

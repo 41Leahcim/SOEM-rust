@@ -16,11 +16,13 @@ use std::{
 };
 
 use heapless::String as HeaplessString;
-use oshw::nicdrv::{Port, RedPort};
+use oshw::nicdrv::Port;
 
 use super::{
     base::{aprd, brd, bwr, fpwr, fpwrw},
-    dc::DistributedClock,
+    config::ConfigError,
+    dc::{config_dc, DistributedClock},
+    eoe::EthernetOverEthercat,
     r#type::{
         AbortError, ErrorType, Ethercat, EthercatHeader, EthercatState, ReadCommand, SiiCategory,
         SiiGeneralItem, WriteCommand, DEFAULT_RETRIES, EEPROM_STATE_MACHINE_BUSY,
@@ -31,7 +33,7 @@ use super::{
 use crate::{
     ethercat::{
         base::{add_datagram, apwr, fprd, setup_datagram},
-        eoe::{header_frame_type_get, EoEFrameType, EthernetOverEthercat},
+        eoe::{header_frame_type_get, EoEFrameType},
         r#type::{
             high_byte, high_word, low_word, BufferState, EepromCommand, EthercatRegister,
             EthernetHeader, MailboxType, EEPROM_STATE_MACHINE_ERROR_MASK,
@@ -43,7 +45,7 @@ use crate::{
     osal::OsalTimer,
     oshw::{
         self,
-        nicdrv::{NicdrvError, SECONDARY_MAC},
+        nicdrv::{NicdrvError, RedundancyMode, SECONDARY_MAC},
         Network,
     },
 };
@@ -97,6 +99,7 @@ pub enum MainError {
     SlaveIndexOutOfBounds(u16),
     InvalidEepromAddress(u16),
     SiiCategoryNotFound(SiiCategory),
+    InvalidSyncManagerType(u8),
     MailboxFull,
     NoMailboxFound,
     SyncManagerIndexOutOfBounds,
@@ -142,7 +145,7 @@ impl Adapter {
     ///
     /// # Returns
     /// First element in linked list of adapters
-    pub fn find_adapters() -> Vec<Adapter> {
+    pub fn find_adapters() -> Vec<Self> {
         use libc::if_nameindex;
         // Iterate all devices and create a local copy holding the name and description
         let ids = unsafe { if_nameindex() };
@@ -156,14 +159,14 @@ impl Adapter {
                 )
                 .unwrap();
                 let desc = name.clone();
-                Adapter { name, desc }
+                Self { name, desc }
             })
             .collect()
     }
 }
 
 /// Fieldbus Memory Management Unit
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Fmmu {
     log_start: Ethercat<u32>,
     log_length: Ethercat<u16>,
@@ -284,7 +287,7 @@ impl Fmmu {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct SyncManager {
     start_address: Ethercat<u16>,
     sm_length: Ethercat<u16>,
@@ -352,7 +355,7 @@ impl<W: Write> WriteTo<W> for SyncManager {
     }
 }
 
-pub struct StateStatus {
+struct StateStatus {
     state: u16,
     _unused: u16,
     al_status_code: u16,
@@ -369,13 +372,13 @@ pub enum MailboxProtocol {
 
 impl From<MailboxProtocol> for u8 {
     fn from(value: MailboxProtocol) -> Self {
-        value as u8
+        value as Self
     }
 }
 
 impl From<MailboxProtocol> for u16 {
     fn from(value: MailboxProtocol) -> Self {
-        value as u16
+        value as Self
     }
 }
 
@@ -393,15 +396,11 @@ pub enum Coedet {
 
 impl From<Coedet> for u8 {
     fn from(value: Coedet) -> Self {
-        value as u8
+        value as Self
     }
 }
 
 pub const SYNC_MANAGER_ENABLE_MASK: u32 = 0xFFFE_FFFF;
-
-#[derive(Debug, Clone, Copy)]
-#[expect(dead_code)]
-pub struct InvalidSyncManagerType(u8);
 
 /// Sync manager type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -427,7 +426,8 @@ impl From<SyncManagerType> for u8 {
 }
 
 impl TryFrom<u8> for SyncManagerType {
-    type Error = InvalidSyncManagerType;
+    type Error = MainError;
+
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Unused),
@@ -435,7 +435,7 @@ impl TryFrom<u8> for SyncManagerType {
             2 => Ok(Self::MailboxRead),
             3 => Ok(Self::Outputs),
             4 => Ok(Self::Inputs),
-            _ => Err(InvalidSyncManagerType(value)),
+            _ => Err(MainError::InvalidSyncManagerType(value)),
         }
     }
 }
@@ -470,6 +470,22 @@ pub struct SlaveEeprom {
 }
 
 impl SlaveEeprom {
+    pub const fn new(
+        manufacturer: u32,
+        id: u32,
+        revision: u32,
+        read_size: EepReadSize,
+        control: EepromControl,
+    ) -> Self {
+        Self {
+            manufacturer,
+            id,
+            revision,
+            read_size,
+            control,
+        }
+    }
+
     pub const fn manufacturer(&self) -> u32 {
         self.manufacturer
     }
@@ -507,6 +523,7 @@ impl SlaveEeprom {
     }
 }
 
+#[derive(Debug, Default)]
 pub struct SlaveMailbox {
     /// Length of write mailbox in bytes, 0 if no mailbox
     length: u16,
@@ -577,7 +594,7 @@ impl SlaveMailbox {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ProtocolDetails {
     canopen_over_ethercat: u8,
     file_over_ethercat: u8,
@@ -1050,6 +1067,58 @@ impl<'slave> Slave<'slave> {
     }
 }
 
+impl Default for Slave<'_> {
+    fn default() -> Self {
+        const DEFAULT_SLICE: &[u8] = &[];
+        Self {
+            state: EthercatState::None,
+            al_status_code: 0,
+            config_address: 0,
+            alias_address: 0,
+            eep: SlaveEeprom::new(0, 0, 0, EepReadSize::Bytes4, EepromControl::Pdi),
+            interface_type: 0,
+            output_bits: 0,
+            output_bytes: 0,
+            io_map: DEFAULT_SLICE,
+            input_offset: 0,
+            output_offset: 0,
+            output_startbit: 0,
+            input_bits: 0,
+            input_bytes: 0,
+            input_startbit: 0,
+            sync_manager: [SyncManager::default(); MAX_SM as usize],
+            sync_manager_type: [SyncManagerType::default(); MAX_SM as usize],
+            fmmu: [Fmmu::default(); MAX_FMMU],
+            fmmu0_function: 0,
+            fmmu1_function: 0,
+            fmmu2_function: 0,
+            fmmu3_function: 0,
+            mailbox: SlaveMailbox::default(),
+            distributed_clock: None,
+            physical_type: 0,
+            topology: 0,
+            active_ports: 0,
+            consumed_ports: 0,
+            slave_number_for_parent: 0,
+            parent_port: 0,
+            parent: 0,
+            entry_port: 0,
+            propagation_delay: Duration::default(),
+            config_index: 0,
+            sii_index: 0,
+            protocol_details: ProtocolDetails::default(),
+            ebus_current: 0,
+            block_logical_read_write: 0,
+            group: 0,
+            fmmu_unused: 0,
+            is_lost: SlaveResponding::SlaveLost,
+            po2_so_config: None,
+            po2_so_configx: None,
+            name: HeaplessString::new(),
+        }
+    }
+}
+
 ///EtherCAT slave group
 #[derive(Debug)]
 pub struct SlaveGroup<'io_map> {
@@ -1210,7 +1279,7 @@ impl<'io_map> Default for SlaveGroup<'io_map> {
 }
 
 /// Record for Ethercat EEPROM communications
-pub struct Eeprom {
+struct Eeprom {
     command: EepromCommand,
     address: u16,
     d2: u16,
@@ -1228,7 +1297,7 @@ impl<W: Write> WriteTo<W> for Eeprom {
 }
 
 /// Eeprom Fieldbus Memory Management Unit
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct EepromFmmu {
     start_position: u16,
     number_fmmu: u8,
@@ -1396,7 +1465,7 @@ impl EepromSyncManager {
         context: &mut Context,
         slave: u16,
         index: u8,
-    ) -> Result<EepromSyncManager, MainError> {
+    ) -> Result<Self, MainError> {
         let eeprom_control = context.slavelist[usize::from(slave)].eeprom().control();
         if index >= self.sync_manager_count {
             return Err(MainError::SyncManagerIndexOutOfBounds);
@@ -1473,7 +1542,7 @@ impl EepromPdo {
         context: &mut Context,
         slave: u16,
         transmitting: bool,
-    ) -> Result<(u32, EepromPdo), MainError> {
+    ) -> Result<(u32, Self), MainError> {
         let eeprom_control = context.slavelist[usize::from(slave)].eeprom().control();
         let mut size = 0;
         let mut pdo_count = 0;
@@ -1986,7 +2055,7 @@ impl<W: Write> WriteTo<W> for MailboxHeader {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ApplicationLayerStatus {
     status: Ethercat<u16>,
 
@@ -2033,13 +2102,19 @@ impl ApplicationLayerStatus {
     }
 }
 
+#[derive(Debug, Default)]
+struct IndexBuffer {
+    index: u8,
+    data: Vec<u8>,
+    dc_offset: u16,
+}
+
 /// Stack structure to store segmented logical read, logical write, logical read/write constructs
-pub struct IndexStack {
+#[derive(Debug, Default)]
+struct IndexStack {
     pushed: u8,
     pulled: u8,
-    index: [u8; MAX_BUFFER_COUNT],
-    data: [Vec<u8>; MAX_BUFFER_COUNT],
-    dc_offset: [u16; MAX_BUFFER_COUNT],
+    buffers: [IndexBuffer; MAX_BUFFER_COUNT],
 }
 
 impl IndexStack {
@@ -2055,9 +2130,9 @@ impl IndexStack {
             return;
         }
         let pushed_usize = usize::from(self.pushed);
-        self.index[pushed_usize] = index;
-        self.data[pushed_usize] = data.to_vec();
-        self.dc_offset[pushed_usize] = dc_offset;
+        self.buffers[pushed_usize].index = index;
+        self.buffers[pushed_usize].data = data.to_vec();
+        self.buffers[pushed_usize].dc_offset = dc_offset;
         self.pushed += 1;
     }
 
@@ -2085,10 +2160,11 @@ impl IndexStack {
 }
 
 /// Ringbuffer for error storage
-pub struct ErrorRing {
+#[derive(Debug, Default)]
+struct ErrorRing {
     head: u16,
     tail: u16,
-    error: [ErrorInfo; MAX_ERROR_LIST_ENTRIES + 1],
+    error: heapless::Vec<ErrorInfo, { MAX_ERROR_LIST_ENTRIES + 1 }>,
 }
 
 /// Sync manager communication type structure for communication access
@@ -2124,7 +2200,7 @@ impl From<SyncManagerCommunicationType> for [u8; 2 + MAX_SM as usize] {
 }
 
 impl TryFrom<[u8; 2 + MAX_SM as usize]> for SyncManagerCommunicationType {
-    type Error = InvalidSyncManagerType;
+    type Error = MainError;
 
     fn try_from(value: [u8; 2 + MAX_SM as usize]) -> Result<Self, Self::Error> {
         let mut sync_manager_type = [SyncManagerType::default(); MAX_SM as usize];
@@ -2231,7 +2307,7 @@ pub enum PacketError {
 
 /// Struct to retrieve errors
 #[derive(Debug, Clone, Copy)]
-pub struct ErrorInfo {
+struct ErrorInfo {
     /// TIme at which the error was generated
     time: SystemTime,
 
@@ -2256,7 +2332,7 @@ pub struct ErrorInfo {
 /// Context structure referenced by all Ethernet eXtended functions
 pub struct Context<'context> {
     /// Port reference may include red port
-    port: Port<'context>,
+    port: Port,
 
     slavelist: Vec<Slave<'context>>,
 
@@ -2272,10 +2348,10 @@ pub struct Context<'context> {
     max_group: u32,
 
     /// Internal reference to eeprom cache buffer
-    esibuf: &'context mut [u8],
+    esibuf: Vec<u8>,
 
     /// internal reference to eeprom cache map
-    esimap: &'context mut [u8],
+    esimap: Vec<u8>,
 
     /// Internal current slave for eeprom cache
     esislave: u16,
@@ -2389,7 +2465,7 @@ impl<'context> Context<'context> {
         &mut self.sync_manager_communication_type[thread_number]
     }
 
-    pub fn port_mut(&mut self) -> &mut Port<'context> {
+    pub fn port_mut(&mut self) -> &mut Port {
         &mut self.port
     }
 
@@ -2520,8 +2596,34 @@ impl<'context> Context<'context> {
     ///
     /// # Returns
     /// `Ok(())` or error
-    pub fn init(&mut self, interface_name: &str) -> Result<(), NicdrvError> {
-        self.port.setup_nic(interface_name, false)
+    pub fn init(interface_name: &str) -> Result<Self, ConfigError> {
+        let mut result = Self {
+            port: Port::setup_nic(interface_name, RedundancyMode::None)?,
+            slavelist: Vec::new(),
+            slave_count: 0,
+            max_slaves: MAX_SLAVES as u16,
+            grouplist: Vec::new(),
+            max_group: MAX_GROUPS as u32,
+            esibuf: Vec::with_capacity(usize::from(MAX_EEPROM_BUFFER_SIZE)),
+            esimap: Vec::with_capacity(usize::from(MAX_EEPROM_BUFFER_SIZE)),
+            esislave: 0,
+            elist: ErrorRing::default(),
+            index_stack: IndexStack::default(),
+            ecaterror: false,
+            dc_time: 0,
+            sync_manager_communication_type: Vec::new(),
+            pdo_assign: Vec::new(),
+            pdo_description: Vec::new(),
+            eep_sync_manager: EepromSyncManager::default(),
+            eep_fmmu: EepromFmmu::default(),
+            file_over_ethercat_hook: None,
+            ethernet_over_ethercat_hook: None,
+            manual_state_change: false,
+            userdata: Vec::new(),
+        };
+        super::config::config_init(&mut result, false)?;
+        config_dc(&mut result)?;
+        Ok(result)
     }
 
     /// Initialize library in redundant NIC mode
@@ -2544,37 +2646,60 @@ impl<'context> Context<'context> {
     ///
     /// # Returns
     /// `Ok(())` or error
-    pub fn init_redundant<'port: 'context>(
-        &mut self,
-        redport: RedPort<'port>,
+    pub fn init_redundant(
         interface_name: &str,
         interface_name2: &str,
-    ) -> Result<(), NicdrvError> {
-        let port = &mut self.port;
-        port.set_red_port(redport);
-        port.setup_nic(interface_name, false)?;
-        let rval = port.setup_nic(interface_name2, true);
+    ) -> Result<Self, ConfigError> {
+        let mut port = Port::setup_nic(interface_name, RedundancyMode::Redundant(interface_name2))?;
 
         // Prepare "dummy" broadcat read tx frame for redundant operation
-        let mut ethernet_header = EthernetHeader::read_from(&mut port.temp_tx_buffer().as_slice())?;
+        let mut ethernet_header =
+            EthernetHeader::read_from(&mut port.stack().temp_tx_buf().as_slice())?;
         ethernet_header.source_address_mut()[1] = Network::from_host(SECONDARY_MAC[0]);
-        ethernet_header.write_to(&mut port.temp_tx_buffer().as_mut_slice())?;
+        ethernet_header.write_to(&mut port.stack_mut().temp_tx_buf_mut().as_mut_slice())?;
         let zbuf = [0; 2];
         setup_datagram(
-            &mut port.temp_tx_buffer(),
+            port.stack_mut().temp_tx_buf_mut(),
             ReadCommand::BroadcastRead.into(),
             0,
             0,
             2,
             &zbuf,
         )?;
-        port.temp_tx_buffer()
+        port.stack_mut()
+            .temp_tx_buf_mut()
             .resize(
                 EthernetHeader::size() + EthernetHeader::size() + ETHERCAT_WORK_COUNTER_SIZE + 2,
                 0,
             )
             .unwrap();
-        rval
+        let mut result = Self {
+            port: Port::setup_nic(interface_name, RedundancyMode::None)?,
+            slavelist: Vec::new(),
+            slave_count: 0,
+            max_slaves: MAX_SLAVES as u16,
+            grouplist: Vec::new(),
+            max_group: MAX_GROUPS as u32,
+            esibuf: Vec::with_capacity(usize::from(MAX_EEPROM_BUFFER_SIZE)),
+            esimap: Vec::with_capacity(usize::from(MAX_EEPROM_BUFFER_SIZE)),
+            esislave: 0,
+            elist: ErrorRing::default(),
+            index_stack: IndexStack::default(),
+            ecaterror: false,
+            dc_time: 0,
+            sync_manager_communication_type: Vec::new(),
+            pdo_assign: Vec::new(),
+            pdo_description: Vec::new(),
+            eep_sync_manager: EepromSyncManager::default(),
+            eep_fmmu: EepromFmmu::default(),
+            file_over_ethercat_hook: None,
+            ethernet_over_ethercat_hook: None,
+            manual_state_change: false,
+            userdata: Vec::new(),
+        };
+        super::config::config_init(&mut result, false)?;
+        config_dc(&mut result)?;
+        Ok(result)
     }
 
     /// Pushes error on the error list
@@ -2582,7 +2707,7 @@ impl<'context> Context<'context> {
     /// # Parameters
     /// - `self`: Context struct
     /// - `error`: Error describtion
-    pub fn push_error(&mut self, mut error: ErrorInfo) {
+    fn push_error(&mut self, mut error: ErrorInfo) {
         error.signal = true;
         self.elist.error[usize::from(self.elist.head)] = error;
         self.elist.head += 1;
@@ -2605,7 +2730,7 @@ impl<'context> Context<'context> {
     ///
     /// # Returns
     /// `Some(ErrorInfo)` if an error is present, None if empty
-    pub fn pop_error(&mut self) -> Option<ErrorInfo> {
+    fn pop_error(&mut self) -> Option<ErrorInfo> {
         self.elist.error[usize::from(self.elist.tail)].signal = false;
         if self.elist.head == self.elist.tail {
             self.ecaterror = false;
@@ -2628,17 +2753,6 @@ impl<'context> Context<'context> {
     /// true if error list contains entries
     pub const fn is_error(&self) -> bool {
         self.elist.head != self.elist.tail
-    }
-
-    /// Close library
-    ///
-    /// # Parameters
-    /// - `self`: Context struct
-    ///
-    /// # Errors
-    /// Returns an error if the NIC sockets couldn't be closed
-    pub fn close(&mut self) -> Result<(), crate::safe_c::CloseError> {
-        self.port.close_nic()
     }
 
     /// Report packet error
@@ -2755,15 +2869,20 @@ impl<'context> Context<'context> {
     pub fn sii_get_byte(&mut self, slave: u16, address: u16) -> Result<u8, MainError> {
         // Make sure the selected slave is cached
         if slave != self.esislave {
-            self.esimap.fill(0);
             self.esislave = slave;
         }
 
         if address >= MAX_EEPROM_BUFFER_SIZE {
             return Err(MainError::InvalidEepromAddress(address));
         }
+        if usize::from(address) >= self.esibuf.len() {
+            self.esibuf.resize(usize::from(address) + 1, 0);
+        }
         let mut mapword = address >> 5;
         let mut mapbyte = address - (mapword << 5);
+        if self.esimap.len() <= usize::from(mapword) {
+            self.esimap.resize(usize::from(mapword) + 1, 0);
+        }
         if self.esimap[usize::from(mapword)] & (1 << mapbyte) != 0 {
             // Byte is already in buffer
             return Ok(self.esibuf[usize::from(address)]);
@@ -2775,6 +2894,11 @@ impl<'context> Context<'context> {
         self.eeprom_to_master(slave)?;
         let eeprom_address = address >> 1;
         let eeprom_data64 = self.read_eeprom_fp(config_address, eeprom_address, TIMEOUT_EEPROM)?;
+
+        if self.esibuf.len() <= (usize::from(eeprom_address) << 1) + 8 {
+            self.esibuf
+                .resize((usize::from(eeprom_address) << 1) + 9, 0);
+        }
 
         let count = if self.slavelist[usize::from(slave)].eeprom().read_size == EepReadSize::Bytes8
         {
@@ -4168,7 +4292,7 @@ impl ProcessDataRequest {
                     let word1 = low_word(logical_address);
                     let word2 = high_word(logical_address);
                     setup_datagram(
-                        &mut context.port.tx_buffers_mut()[usize::from(index)],
+                        &mut context.port.stack_mut().tx_buffers_mut()[usize::from(index)],
                         ReadCommand::LogicalRead.into(),
                         index,
                         word1,
@@ -4182,7 +4306,7 @@ impl ProcessDataRequest {
                             .get_slave(context.grouplist[group_usize].dc_next.unwrap())
                             .config_address;
                         add_datagram(
-                            &mut context.port.tx_buffers_mut()[usize::from(index)],
+                            &mut context.port.stack_mut().tx_buffers_mut()[usize::from(index)],
                             ReadCommand::LogicalRead.into(),
                             index,
                             false,
@@ -4230,7 +4354,7 @@ impl ProcessDataRequest {
                     let word2 = high_word(logical_address);
 
                     setup_datagram(
-                        &mut context.port.tx_buffers_mut()[usize::from(index)],
+                        &mut context.port.stack_mut().tx_buffers_mut()[usize::from(index)],
                         ReadCommand::FixedReadMultipleWrite.into(),
                         index,
                         word1,
@@ -4242,7 +4366,7 @@ impl ProcessDataRequest {
 
                         // Fixed Pointer Read Multiple Write in second datagram
                         add_datagram(
-                            &mut context.port.tx_buffers_mut()[usize::from(index)],
+                            &mut context.port.stack_mut().tx_buffers_mut()[usize::from(index)],
                             ReadCommand::FixedReadMultipleWrite.into(),
                             index,
                             false,
@@ -4298,7 +4422,7 @@ impl ProcessDataRequest {
                 let word2 = high_word(logical_address);
 
                 setup_datagram(
-                    &mut context.port.tx_buffers_mut()[usize::from(index)],
+                    &mut context.port.stack_mut().tx_buffers_mut()[usize::from(index)],
                     ReadCommand::LogicalReadWrite.into(),
                     index,
                     word1,
@@ -4311,7 +4435,7 @@ impl ProcessDataRequest {
 
                     //Fixed Pointer Read Multiple Write in second datagram
                     add_datagram(
-                        &mut context.port.tx_buffers_mut()[usize::from(index)],
+                        &mut context.port.stack_mut().tx_buffers_mut()[usize::from(index)],
                         ReadCommand::FixedReadMultipleWrite.into(),
                         index,
                         false,
@@ -4447,7 +4571,7 @@ impl ProcessDataRequest {
 
         while let Some(position) = context.index_stack.pull_index() {
             let position_usize = usize::from(position);
-            let index = context.index_stack.index[position_usize];
+            let index = context.index_stack.buffers[position_usize].index;
             wkc2 = context.port.wait_in_frame(index, timeout);
 
             // Check if the frame contains input data
@@ -4456,7 +4580,8 @@ impl ProcessDataRequest {
             };
 
             let command_type = ReadCommand::try_from(
-                context.port.rx_buffers_mut()[usize::from(index)][ETHERCAT_COMMAND_OFFET],
+                context.port.stack_mut().rx_buffers_mut()[usize::from(index)].data()
+                    [ETHERCAT_COMMAND_OFFET],
             );
 
             let index_usize = usize::from(index);
@@ -4464,41 +4589,51 @@ impl ProcessDataRequest {
                 command_type,
                 Ok(ReadCommand::LogicalRead | ReadCommand::LogicalReadWrite)
             ) {
-                if context.index_stack.dc_offset[position_usize] != 0 {
-                    context.index_stack.data[position_usize].copy_from_slice(
-                        &context.port.rx_buffers_mut()[index_usize][EthercatHeader::size()..],
-                    );
+                if context.index_stack.buffers[position_usize].dc_offset != 0 {
+                    context.index_stack.buffers[position_usize].data.clear();
+                    context.index_stack.buffers[position_usize]
+                        .data
+                        .clone_from_slice(
+                            &context.port.stack().rx_buffers()[index_usize].data()
+                                [EthercatHeader::size()..],
+                        );
                     let mut word = [0; 2];
                     word.copy_from_slice(
-                        &context.port.rx_buffers_mut()[index_usize][EthercatHeader::size()
-                            + context.index_stack.data[position_usize].len()..],
+                        &context.port.stack().rx_buffers()[index_usize].data()[EthercatHeader::size(
+                        )
+                            + context.index_stack.buffers[position_usize].data.len()..],
                     );
                     wkc = Ethercat::<u16>::from_bytes(word).to_host();
                     let mut long_word = [0; 8];
                     long_word.copy_from_slice(
-                        &context.port.rx_buffers_mut()[index_usize]
-                            [usize::from(context.index_stack.dc_offset[position_usize])..],
+                        &context.port.stack().rx_buffers()[index_usize].data()
+                            [usize::from(context.index_stack.buffers[position_usize].dc_offset)..],
                     );
                     context.dc_time = Ethercat::<i64>::from_bytes(long_word).to_host();
                 } else {
                     // Copy input data back to process data buffer
-                    context.index_stack.data[position_usize].copy_from_slice(
-                        &context.port.rx_buffers_mut()[index_usize][EthercatHeader::size()..],
-                    );
+                    context.index_stack.buffers[position_usize].data.clear();
+                    context.index_stack.buffers[position_usize]
+                        .data
+                        .clone_from_slice(
+                            &context.port.stack().rx_buffers()[index_usize].data()
+                                [EthercatHeader::size()..],
+                        );
                     wkc += work_counter2_value;
                 }
                 valid_work_counter = true;
-            } else if context.port.rx_buffers_mut()[usize::from(index)][ETHERCAT_COMMAND_OFFET]
+            } else if context.port.stack().rx_buffers()[usize::from(index)].data()
+                [ETHERCAT_COMMAND_OFFET]
                 == u8::from(WriteCommand::LogicalWrite)
             {
-                if context.index_stack.dc_offset[usize::from(position)] != 0 {
+                if context.index_stack.buffers[usize::from(position)].dc_offset != 0 {
                     let mut word = [0; ETHERCAT_WORK_COUNTER_SIZE];
                     word.copy_from_slice(
-                        &context.port.rx_buffers_mut()[usize::from(index)][EthercatHeader::size(
-                        ) + context
-                            .index_stack
-                            .data[usize::from(position)]
-                        .len()..],
+                        &context.port.stack().rx_buffers()[usize::from(index)].data()
+                            [EthercatHeader::size()
+                                + context.index_stack.buffers[usize::from(position)]
+                                    .data
+                                    .len()..],
                     );
 
                     // Output WKC counts 2 times when using logical read write, emulate the same
@@ -4506,8 +4641,10 @@ impl ProcessDataRequest {
                     wkc = Ethercat::<u16>::from_bytes(word).to_host() * 2;
                     let mut long = [0; 8];
                     long.copy_from_slice(
-                        &context.port.rx_buffers_mut()[usize::from(index)]
-                            [usize::from(context.index_stack.dc_offset[usize::from(position)])..],
+                        &context.port.stack().rx_buffers()[usize::from(index)].data()
+                            [usize::from(
+                                context.index_stack.buffers[usize::from(position)].dc_offset,
+                            )..],
                     );
                     context.dc_time = Ethercat::<i64>::from_bytes(long).to_host();
                 } else {
@@ -4557,7 +4694,7 @@ fn fixed_pointer_read_multi(
     let index = port.get_index();
     let mut sl_count: u16 = 0;
     setup_datagram(
-        &mut port.tx_buffers_mut()[usize::from(index)],
+        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
         ReadCommand::FixedPointerRead.into(),
         index,
         config_list[usize::from(sl_count)],
@@ -4569,7 +4706,7 @@ fn fixed_pointer_read_multi(
     sl_count += 1;
     for sl_count in sl_count..number - 1 {
         sl_data_position[usize::from(sl_count)] = add_datagram(
-            &mut port.tx_buffers_mut()[usize::from(index)],
+            &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
             ReadCommand::FixedPointerRead.into(),
             index,
             true,
@@ -4581,7 +4718,7 @@ fn fixed_pointer_read_multi(
     sl_count = sl_count.max(number - 1);
     if sl_count < number {
         sl_data_position[usize::from(sl_count)] = add_datagram(
-            &mut port.tx_buffers_mut()[usize::from(index)],
+            &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
             ReadCommand::FixedPointerRead.into(),
             index,
             false,
@@ -4593,8 +4730,9 @@ fn fixed_pointer_read_multi(
     port.src_confirm(index, timeout)?;
     for sl_count in 0..number {
         sl_status_list[usize::from(sl_count)] = ApplicationLayerStatus::read_from(
-            &mut &port.rx_buffers_mut()[usize::from(index)].as_mut_slice()
-                [sl_data_position[usize::from(sl_count)]..],
+            &mut &port.stack().rx_buffers()[usize::from(index)]
+                .data()
+                .as_slice()[sl_data_position[usize::from(sl_count)]..],
         )?;
     }
 

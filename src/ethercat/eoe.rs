@@ -208,7 +208,7 @@ pub enum EoEResult {
 
 impl From<EoEResult> for u16 {
     fn from(value: EoEResult) -> Self {
-        value as u16
+        value as Self
     }
 }
 
@@ -216,8 +216,19 @@ pub struct EthernetAddress {
     address: [u8; ETHERNET_ADDRESS_LENGTH],
 }
 
+impl EthernetAddress {
+    pub const fn address(&self) -> &[u8; ETHERNET_ADDRESS_LENGTH] {
+        &self.address
+    }
+
+    pub const fn new(address: [u8; ETHERNET_ADDRESS_LENGTH]) -> Self {
+        Self { address }
+    }
+}
+
 /// EoE IP request structure, storage only, no need to pack
-pub struct EoeParameter {
+#[derive(Default)]
+pub struct Parameter {
     mac: Option<EthernetAddress>,
     ip: Option<Ipv4Addr>,
     subnet: Option<Ipv4Addr>,
@@ -226,27 +237,97 @@ pub struct EoeParameter {
     dns_name: Option<heapless::String<DNS_NAME_LENGTH>>,
 }
 
-pub enum EthernetOverEthercatInfoResult {
+impl Parameter {
+    pub const fn new() -> Self {
+        Self {
+            mac: None,
+            ip: None,
+            subnet: None,
+            default_gateway: None,
+            dns_ip: None,
+            dns_name: None,
+        }
+    }
+
+    pub const fn mac(&self) -> Option<&EthernetAddress> {
+        self.mac.as_ref()
+    }
+
+    #[must_use]
+    pub const fn with_mac(mut self, mac: EthernetAddress) -> Self {
+        self.mac = Some(mac);
+        self
+    }
+
+    pub const fn ip(&self) -> Option<Ipv4Addr> {
+        self.ip
+    }
+
+    #[must_use]
+    pub const fn with_ip(mut self, ip: Ipv4Addr) -> Self {
+        self.ip = Some(ip);
+        self
+    }
+
+    pub const fn subnet(&self) -> Option<Ipv4Addr> {
+        self.subnet
+    }
+
+    #[must_use]
+    pub const fn with_subnet(mut self, subnet: Ipv4Addr) -> Self {
+        self.subnet = Some(subnet);
+        self
+    }
+
+    pub const fn default_gateway(&self) -> Option<Ipv4Addr> {
+        self.default_gateway
+    }
+
+    #[must_use]
+    pub const fn with_default_gateway(mut self, default_gateway: Ipv4Addr) -> Self {
+        self.default_gateway = Some(default_gateway);
+        self
+    }
+
+    pub const fn dns_ip(&self) -> Option<Ipv4Addr> {
+        self.dns_ip
+    }
+
+    #[must_use]
+    pub const fn with_dns_ip(mut self, dns_ip: Ipv4Addr) -> Self {
+        self.dns_ip = Some(dns_ip);
+        self
+    }
+
+    pub fn dns_name(&self) -> Option<&str> {
+        self.dns_name.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_dns_name(mut self, dns_name: heapless::String<32>) -> Self {
+        self.dns_name = Some(dns_name);
+        self
+    }
+}
+
+pub enum InfoResult {
     FrameInfo2(Ethercat<u16>),
     Result(Ethercat<u16>),
 }
 
-impl EthernetOverEthercatInfoResult {
+impl InfoResult {
     pub const fn size() -> usize {
         size_of::<u16>()
     }
 
     pub const fn inner(&self) -> Ethercat<u16> {
         match self {
-            EthernetOverEthercatInfoResult::FrameInfo2(word)
-            | EthernetOverEthercatInfoResult::Result(word) => *word,
+            Self::FrameInfo2(word) | Self::Result(word) => *word,
         }
     }
 }
 
 pub enum EoEError {
-    EoEFromBytes(EthernetOverEthercatFromBytesError),
-    EoEWrite(EthernetOverEthercatWriteError),
     Main(MainError),
     Utf8(Utf8Error),
     Io(io::Error),
@@ -264,18 +345,6 @@ impl From<MainError> for EoEError {
     }
 }
 
-impl From<EthernetOverEthercatFromBytesError> for EoEError {
-    fn from(value: EthernetOverEthercatFromBytesError) -> Self {
-        Self::EoEFromBytes(value)
-    }
-}
-
-impl From<EthernetOverEthercatWriteError> for EoEError {
-    fn from(value: EthernetOverEthercatWriteError) -> Self {
-        Self::EoEWrite(value)
-    }
-}
-
 impl From<Utf8Error> for EoEError {
     fn from(value: Utf8Error) -> Self {
         Self::Utf8(value)
@@ -288,44 +357,11 @@ impl From<io::Error> for EoEError {
     }
 }
 
-pub enum EthernetOverEthercatFromBytesError {
-    InvalidSize(usize),
-    Io(io::Error),
-}
-
-impl From<io::Error> for EthernetOverEthercatFromBytesError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
-pub enum EthernetOverEthercatWriteError {
-    Io(io::Error),
-    FailedToWriteCompletely(usize),
-}
-
-impl From<io::Error> for EthernetOverEthercatWriteError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
 pub struct EthernetOverEthercat {
     mailbox_header: MailboxHeader,
     frame_info1: Ethercat<u16>,
-    info_result: EthernetOverEthercatInfoResult,
+    info_result: InfoResult,
     data: [u8; MAX_DATA_LENGTH],
-}
-
-impl Default for EthernetOverEthercat {
-    fn default() -> Self {
-        Self {
-            mailbox_header: MailboxHeader::default(),
-            frame_info1: Ethercat::default(),
-            info_result: EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::default()),
-            data: [0; MAX_DATA_LENGTH],
-        }
-    }
 }
 
 impl<R: Read> ReadFrom<R> for EthernetOverEthercat {
@@ -334,9 +370,8 @@ impl<R: Read> ReadFrom<R> for EthernetOverEthercat {
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
         let frame_info1 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let info_result = EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::<u16>::from_bytes(
-            Self::read_bytes(reader)?,
-        ));
+        let info_result =
+            InfoResult::FrameInfo2(Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?));
         let data = Self::read_bytes(reader)?;
         Ok(Self {
             mailbox_header,
@@ -359,14 +394,22 @@ impl<W: Write> WriteTo<W> for EthernetOverEthercat {
 }
 
 impl EthernetOverEthercat {
+    pub const fn mailbox_header(&self) -> &MailboxHeader {
+        &self.mailbox_header
+    }
+
     pub const fn frame_info1(&self) -> Ethercat<u16> {
         self.frame_info1
+    }
+
+    pub const fn info_result(&self) -> &InfoResult {
+        &self.info_result
     }
 
     pub const fn size() -> usize {
         MailboxHeader::size()
             + size_of::<u16>()
-            + EthernetOverEthercatInfoResult::size()
+            + InfoResult::size()
             + size_of::<u8>() * MAX_DATA_LENGTH
     }
 }
@@ -413,64 +456,66 @@ pub fn set_ip(
     context: &mut Context,
     slave: u16,
     port: u8,
-    ip_parameter: &mut EoeParameter,
+    ip_parameter: &Parameter,
     timeout: Duration,
 ) -> Result<(), EoEError> {
     let mut mailbox_in = MailboxIn::default();
 
     // Empty slave out mailbox if something is in it, with timeout set to 0.
     mailbox_in.receive(context, slave, Duration::default())?;
-    let mut eoe = EthernetOverEthercat::default();
-    *eoe.mailbox_header.address_mut() = Ethercat::from_host(0);
-    *eoe.mailbox_header.priority_mut() = 0;
     let mut data_offset = usize::from(PARAMETER_OFFSET);
 
-    // Get new mailbox count value, used as session handle
-    *eoe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::EthernetOverEthercat)
-        | mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
-
-    eoe.frame_info1 = Ethercat::from_host(
-        u16::from(header_frame_type_set(EoEFrameType::InitRequest) | header_frame_port_set(port))
-            | HEADER_LAST_FRAGMENT,
-    );
-
-    eoe.info_result = EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::default());
-
+    let mut data = [0; MAX_DATA_LENGTH];
     let mut flags = 0;
     if let Some(mac) = &ip_parameter.mac {
         flags |= PARAMETER_MAC_INCLUDE;
-        eoe.data[data_offset..].copy_from_slice(&mac.address);
+        data[data_offset..].copy_from_slice(&mac.address);
         data_offset += ETHERNET_ADDRESS_LENGTH;
     }
     if let Some(ip) = ip_parameter.ip {
         flags |= PARAM_IP_INCLUDE;
-        ip_to_bytes(ip, &mut eoe.data[data_offset..]);
+        ip_to_bytes(ip, &mut data[data_offset..]);
         data_offset += IP4_LENGTH;
     }
     if let Some(subnet) = ip_parameter.subnet {
         flags |= PARAM_SUBNET_IP_INCLUDE;
-        ip_to_bytes(subnet, &mut eoe.data[data_offset..]);
+        ip_to_bytes(subnet, &mut data[data_offset..]);
         data_offset += IP4_LENGTH;
     }
     if let Some(default_gateway) = ip_parameter.default_gateway {
         flags |= PARAM_DEFAULT_GATEWAY_INCLUDE;
-        ip_to_bytes(default_gateway, &mut eoe.data[data_offset..]);
+        ip_to_bytes(default_gateway, &mut data[data_offset..]);
         data_offset += IP4_LENGTH;
     }
     if let Some(dns_ip) = ip_parameter.dns_ip {
         flags |= PARAM_DNS_IP_INCLUDE;
-        ip_to_bytes(dns_ip, &mut eoe.data[data_offset..]);
+        ip_to_bytes(dns_ip, &mut data[data_offset..]);
         data_offset += IP4_LENGTH;
     }
     if let Some(dns_name) = &ip_parameter.dns_name {
         flags |= PARAM_DNS_NAME_INCLUDE;
-        eoe.data[data_offset..].copy_from_slice(dns_name.as_bytes());
+        data[data_offset..].copy_from_slice(dns_name.as_bytes());
         data_offset += IP4_LENGTH;
     }
 
-    *eoe.mailbox_header.length_mut() =
-        Ethercat::from_host(u16::from(PARAMETER_OFFSET) + data_offset as u16);
-    eoe.data[0] = flags;
+    data[0] = flags;
+    let eoe = EthernetOverEthercat {
+        mailbox_header: MailboxHeader::new(
+            Ethercat::from_host(u16::from(PARAMETER_OFFSET) + data_offset as u16),
+            Ethercat::default(),
+            0,
+            // Get new mailbox count value, used as session handle
+            u8::from(MailboxType::EthernetOverEthercat)
+                | mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+        ),
+        frame_info1: Ethercat::from_host(
+            u16::from(
+                header_frame_type_set(EoEFrameType::InitRequest) | header_frame_port_set(port),
+            ) | HEADER_LAST_FRAGMENT,
+        ),
+        info_result: InfoResult::FrameInfo2(Ethercat::default()),
+        data,
+    };
 
     // Send Ethernet over Ethercat request to slave
     let mut mailbox_out = MailboxOut::default();
@@ -521,30 +566,31 @@ pub fn get_ip(
     context: &mut Context,
     slave: u16,
     port: u8,
-    ip_parameter: &mut EoeParameter,
     timeout: Duration,
 ) -> Result<(), EoEError> {
     // Empty slave out mailob if something is in, with timeout set to 0.
     let mut mailbox_in = MailboxIn::default();
     mailbox_in.receive(context, slave, timeout)?;
 
-    let mut eoe = EthernetOverEthercat::default();
-    *eoe.mailbox_header.address_mut() = Ethercat::default();
-    *eoe.mailbox_header.priority_mut() = 0;
     let mut data_offset = usize::from(PARAMETER_OFFSET);
-    *eoe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::EthernetOverEthercat)
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
 
-    eoe.frame_info1 = Ethercat::from_host(
-        u16::from(
-            header_frame_type_set(EoEFrameType::GetIpParameterRequest)
-                | header_frame_port_set(port),
-        ) | HEADER_LAST_FRAGMENT,
-    );
-    eoe.info_result = EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::default());
-    *eoe.mailbox_header.length_mut() = Ethercat::from_host(4);
-    let mut flags = 0;
-    eoe.data[0] = flags;
+    let eoe = EthernetOverEthercat {
+        mailbox_header: MailboxHeader::new(
+            Ethercat::from_host(4),
+            Ethercat::default(),
+            0,
+            u8::from(MailboxType::EthernetOverEthercat)
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+        ),
+        frame_info1: Ethercat::from_host(
+            u16::from(
+                header_frame_type_set(EoEFrameType::GetIpParameterRequest)
+                    | header_frame_port_set(port),
+            ) | HEADER_LAST_FRAGMENT,
+        ),
+        info_result: InfoResult::FrameInfo2(Ethercat::default()),
+        data: [0; MAX_DATA_LENGTH],
+    };
 
     // Send EoE request to slave
     let mut mailbox_out = MailboxOut::default();
@@ -555,7 +601,7 @@ pub fn get_ip(
     mailbox_in.receive(context, slave, timeout)?;
 
     // Slave response should be Ethernet over EtherCAT
-    let a_eoe = EthernetOverEthercat::default();
+    let a_eoe = EthernetOverEthercat::read_from(&mut mailbox_in)?;
     if a_eoe.mailbox_header.mailbox_type() & 0xF == MailboxType::EthernetOverEthercat.into() {
         return Err(EoEError::PacketError);
     }
@@ -564,7 +610,8 @@ pub fn get_ip(
     if header_frame_type_get(frame_info1 as u8)? != EoEFrameType::GetIpParameterResponse {
         return Err(EoEError::UnsupportedFrameType);
     }
-    flags = a_eoe.data[0];
+    let flags = a_eoe.data[0];
+    let mut ip_parameter = Parameter::default();
     if flags & PARAMETER_MAC_INCLUDE != 0 {
         let mut address = [0; ETHERNET_ADDRESS_LENGTH];
         address.copy_from_slice(&eoe.data[data_offset..]);
@@ -628,10 +675,6 @@ pub fn send(
     buffer: &mut [u8],
     timeout: Duration,
 ) -> Result<(), EoEError> {
-    let mut eoe = EthernetOverEthercat::default();
-    *eoe.mailbox_header.address_mut() = Ethercat::default();
-    *eoe.mailbox_header.priority_mut() = 0;
-
     // Data section=mailbox size - 6 mailbox - 4 EoEh
     let max_data = context.get_slave(slave).mailbox().length() - 0xA;
     let mut tx_fragment_number: u8 = 0;
@@ -658,18 +701,25 @@ pub fn send(
             }
             | header_frame_number_set(u16::from(tx_fragment_number));
 
-        // Get new mailbox count value, used as session handle
-        *eoe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::EthernetOverEthercat)
-            + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
-
-        *eoe.mailbox_header.length_mut() = Ethercat::from_host(4 + tx_frame_size);
-
-        eoe.frame_info1 = Ethercat::from_host(frame_info1);
-        eoe.info_result =
-            EthernetOverEthercatInfoResult::FrameInfo2(Ethercat::from_host(frame_info2));
-        eoe.data.copy_from_slice(
+        let mut data = [0; MAX_DATA_LENGTH];
+        data.copy_from_slice(
             &buffer[usize::from(tx_frame_offset)..usize::from(tx_frame_offset + tx_frame_size)],
         );
+        let eoe = EthernetOverEthercat {
+            mailbox_header: MailboxHeader::new(
+                Ethercat::from_host(4 + tx_frame_size),
+                Ethercat::default(),
+                0,
+                // Get new mailbox count value, used as session handle
+                u8::from(MailboxType::EthernetOverEthercat)
+                    + mailbox_header_set_count(
+                        context.get_slave_mut(slave).mailbox_mut().next_count(),
+                    ),
+            ),
+            frame_info1: Ethercat::from_host(frame_info1),
+            info_result: InfoResult::FrameInfo2(Ethercat::from_host(frame_info2)),
+            data,
+        };
 
         // Send EoE request to slave
         let mut mailbox_out = MailboxOut::default();

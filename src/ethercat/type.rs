@@ -98,9 +98,9 @@ pub struct EthernetHeader {
 }
 
 impl EthernetHeader {
-    pub fn new(mac: [u16; 3]) -> Self {
+    pub fn new(source_mac: [u16; 3]) -> Self {
         let destination_address = array::from_fn(|_| Network::from_host(0xFFFF));
-        let source_address = array::from_fn(|i| Network::from_host(mac[i]));
+        let source_address = array::from_fn(|i| Network::from_host(source_mac[i]));
         let etype = Network::from_host(ETH_P_ECAT);
         Self {
             destination_address,
@@ -354,13 +354,13 @@ pub enum EthercatState {
 
 impl From<EthercatState> for u8 {
     fn from(value: EthercatState) -> Self {
-        value as u8
+        value as Self
     }
 }
 
 impl From<EthercatState> for u16 {
     fn from(value: EthercatState) -> Self {
-        u16::from(u8::from(value))
+        Self::from(u8::from(value))
     }
 }
 
@@ -369,13 +369,13 @@ impl TryFrom<u8> for EthercatState {
 
     fn try_from(value: u8) -> Result<Self, MainError> {
         match value {
-            0 => Ok(EthercatState::None),
-            1 => Ok(EthercatState::Init),
-            2 => Ok(EthercatState::PreOperational),
-            3 => Ok(EthercatState::Boot),
-            4 => Ok(EthercatState::SafeOperational),
-            8 => Ok(EthercatState::Operational),
-            0x10 => Ok(EthercatState::Error),
+            0 => Ok(Self::None),
+            1 => Ok(Self::Init),
+            2 => Ok(Self::PreOperational),
+            3 => Ok(Self::Boot),
+            4 => Ok(Self::SafeOperational),
+            8 => Ok(Self::Operational),
+            0x10 => Ok(Self::Error),
             _ => Err(MainError::InvalidEthercatState(value)),
         }
     }
@@ -400,13 +400,14 @@ pub enum BufferState {
     Complete,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 #[expect(dead_code)]
 pub struct InvalidDataType(u8);
 
 /// Ethercat data types
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub enum Datatype {
+    #[default]
     Invalid,
     Boolean,
     Integer8,
@@ -496,7 +497,7 @@ pub enum WriteCommand {
 
 impl From<WriteCommand> for u8 {
     fn from(value: WriteCommand) -> Self {
-        value as u8
+        value as Self
     }
 }
 
@@ -557,7 +558,7 @@ pub enum ReadCommand {
 
 impl From<ReadCommand> for u8 {
     fn from(value: ReadCommand) -> Self {
-        value as u8
+        value as Self
     }
 }
 
@@ -620,8 +621,8 @@ impl TryFrom<u8> for Command {
 impl From<Command> for u8 {
     fn from(value: Command) -> Self {
         match value {
-            Command::ReadCommand(read_command) => u8::from(read_command),
-            Command::WriteCommand(write_command) => u8::from(write_command),
+            Command::ReadCommand(read_command) => Self::from(read_command),
+            Command::WriteCommand(write_command) => Self::from(write_command),
         }
     }
 }
@@ -642,7 +643,7 @@ pub enum EepromCommand {
 
 impl From<EepromCommand> for u16 {
     fn from(value: EepromCommand) -> Self {
-        value as u16
+        value as Self
     }
 }
 
@@ -683,13 +684,13 @@ pub enum SiiCategory {
 
 impl From<SiiCategory> for u8 {
     fn from(value: SiiCategory) -> Self {
-        value as u8
+        value as Self
     }
 }
 
 impl From<SiiCategory> for u16 {
     fn from(value: SiiCategory) -> Self {
-        u16::from(u8::from(value))
+        Self::from(u8::from(value))
     }
 }
 
@@ -725,13 +726,13 @@ pub enum SiiGeneralItem {
 
 impl From<SiiGeneralItem> for u8 {
     fn from(value: SiiGeneralItem) -> Self {
-        value as u8
+        value as Self
     }
 }
 
 impl From<SiiGeneralItem> for u16 {
     fn from(value: SiiGeneralItem) -> Self {
-        u16::from(u8::from(value))
+        Self::from(u8::from(value))
     }
 }
 
@@ -779,13 +780,13 @@ impl TryFrom<u8> for MailboxType {
 
     fn try_from(value: u8) -> Result<Self, MainError> {
         match value {
-            0 => Ok(MailboxType::Error),
-            1 => Ok(MailboxType::AdsOverEthercat),
-            2 => Ok(MailboxType::EthernetOverEthercat),
-            3 => Ok(MailboxType::CanopenOverEthercat),
-            4 => Ok(MailboxType::FileOverEthercat),
-            5 => Ok(MailboxType::ServoOverEthercat),
-            0xF => Ok(MailboxType::VendorOverEthercat),
+            0 => Ok(Self::Error),
+            1 => Ok(Self::AdsOverEthercat),
+            2 => Ok(Self::EthernetOverEthercat),
+            3 => Ok(Self::CanopenOverEthercat),
+            4 => Ok(Self::FileOverEthercat),
+            5 => Ok(Self::ServoOverEthercat),
+            0xF => Ok(Self::VendorOverEthercat),
             _ => Err(MainError::InvalidMailboxType(value)),
         }
     }
@@ -910,7 +911,7 @@ pub enum COEObjectDescriptionCommand {
 
 impl From<COEObjectDescriptionCommand> for u8 {
     fn from(value: COEObjectDescriptionCommand) -> Self {
-        value as u8
+        value as Self
     }
 }
 
@@ -958,7 +959,7 @@ pub enum FileOverEthercatOpcode {
 
 impl From<FileOverEthercatOpcode> for u8 {
     fn from(value: FileOverEthercatOpcode) -> Self {
-        value as u8
+        value as Self
     }
 }
 
@@ -992,7 +993,7 @@ pub enum ServoOverEthercatOpcode {
 
 impl From<ServoOverEthercatOpcode> for u8 {
     fn from(value: ServoOverEthercatOpcode) -> Self {
-        value as u8
+        value as Self
     }
 }
 

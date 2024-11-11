@@ -204,7 +204,7 @@ fn execute_primitive_read_command(
 
     // Setup datagram
     setup_datagram(
-        &mut port.tx_buffers_mut()[usize::from(index)],
+        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
         Command::ReadCommand(command),
         index,
         address_position,
@@ -215,7 +215,9 @@ fn execute_primitive_read_command(
     // Send data and wait for answer
     let wkc = port.src_confirm(index, timeout)?;
 
-    data.copy_from_slice(&port.rx_buffers_mut()[usize::from(index)][EthercatHeader::size()..]);
+    data.copy_from_slice(
+        &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+    );
 
     // Clear buffer status
     port.set_buf_stat(index.into(), BufferState::Empty);
@@ -236,7 +238,7 @@ fn execute_primitive_write_command(
 
     // Setup datagram
     setup_datagram(
-        &mut port.tx_buffers_mut()[usize::from(index)],
+        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
         Command::WriteCommand(command),
         index,
         address_position,
@@ -799,7 +801,7 @@ pub fn lrwdc(
 ) -> Result<u16, NicdrvError> {
     let index = port.get_index();
     let distributed_clock_offset = {
-        let tx_buffer = &mut port.tx_buffers_mut()[usize::from(index)];
+        let tx_buffer = &mut port.stack_mut().tx_buffers_mut()[usize::from(index)];
 
         // Logical read write in first datagram
         setup_datagram(
@@ -826,7 +828,7 @@ pub fn lrwdc(
 
     let mut wkc = port.src_confirm(index, timeout).unwrap();
     {
-        let rx_buffer = &mut port.rx_buffers_mut()[usize::from(index)];
+        let rx_buffer = &mut port.stack().rx_buffers()[usize::from(index)].data();
         if rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into() {
             let mut response_iter = rx_buffer[EthercatHeader::size()..].iter();
             data.iter_mut()

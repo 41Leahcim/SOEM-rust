@@ -1,4 +1,9 @@
-#![warn(clippy::todo, clippy::missing_const_for_fn, clippy::pedantic)]
+#![warn(
+    clippy::todo,
+    clippy::missing_const_for_fn,
+    clippy::pedantic,
+    clippy::use_self
+)]
 #![expect(
     clippy::doc_markdown,
     clippy::too_many_lines,

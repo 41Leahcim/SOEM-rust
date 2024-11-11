@@ -35,14 +35,51 @@ pub struct DistributedClock {
     /// Previous DC slave
     previous: u16,
 
-    /// DC cycle received in nanoseconds
+    /// DC cycle received
     cycle: Duration,
 
-    /// DC shift from clock modulus boundary
+    /// DC shift from clock modulus boundaryin nanoseconds
     shift: i32,
 
     /// DC sync activation
     active: bool,
+}
+
+impl DistributedClock {
+    /// DC receive times on ports A to D
+    pub const fn receive_times(&self) -> [Duration; 4] {
+        [
+            self.receive_time_a,
+            self.receive_time_b,
+            self.receive_time_c,
+            self.receive_time_d,
+        ]
+    }
+
+    /// Next DC slave
+    pub const fn next_slave(&self) -> u16 {
+        self.next
+    }
+
+    /// Previous DC slave
+    pub const fn previous_slave(&self) -> u16 {
+        self.previous
+    }
+
+    /// DC cycle received
+    pub const fn dc_cycle(&self) -> Duration {
+        self.cycle
+    }
+
+    /// DC shift from clock modulus boundaryin nanoseconds
+    pub const fn dc_shift_nanoseconds(&self) -> i32 {
+        self.shift
+    }
+
+    /// DC sync activation
+    pub const fn active(&self) -> bool {
+        self.active
+    }
 }
 
 /// Set DC of slave to fire sync0 at `cycle_time` interval with `cycle_shift` offset.

@@ -72,9 +72,7 @@ impl Default for PacketInfo {
 impl PacketInfo {
     pub const fn inner(&self) -> Ethercat<u32> {
         match self {
-            PacketInfo::Password(value)
-            | PacketInfo::PacketNumber(value)
-            | PacketInfo::ErrorCode(value) => *value,
+            Self::Password(value) | Self::PacketNumber(value) | Self::ErrorCode(value) => *value,
         }
     }
 }
@@ -95,8 +93,8 @@ impl Default for PacketData {
 impl PacketData {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            PacketData::FileName(string) | PacketData::ErrorText(string) => string.as_bytes(),
-            PacketData::Data(vec) => vec,
+            Self::FileName(string) | Self::ErrorText(string) => string.as_bytes(),
+            Self::Data(vec) => vec,
         }
     }
 }

@@ -22,8 +22,8 @@ use crate::ethercat::r#type::{
 use super::main::PdoAssign;
 use super::main::PdoDescription;
 use super::main::{
-    Context, InvalidSyncManagerType, MailboxHeader, MailboxIn, MailboxOut,
-    MainError as MailboxError, PacketError, SyncManagerCommunicationType, MAX_NAME_LENGTH,
+    Context, MailboxHeader, MailboxIn, MailboxOut, MainError as MailboxError, PacketError,
+    SyncManagerCommunicationType, MAX_NAME_LENGTH,
 };
 use super::r#type::{
     AbortError, COEObjectDescriptionCommand, Datatype, Ethercat, InvalidCommand, InvalidDataType,
@@ -32,29 +32,19 @@ use super::r#type::{
 use super::ReadFrom;
 use super::WriteTo;
 
-/// Invalid Service Data Object size
 #[derive(Debug)]
-pub struct InvalidSDOSize;
-
-#[derive(Debug)]
+#[must_use]
 pub enum CoEError {
-    InvalidSDOSize(InvalidSDOSize),
+    InvalidSDOSize,
     InvalidOpcode(InvalidCommand),
     Mailbox(MailboxError),
     Packet(PacketError),
     Abort(AbortError),
-    InvalidSyncManagerType(InvalidSyncManagerType),
     NoIoFoundInPdoMap,
     TryFromInt(TryFromIntError),
     InvalidDataType(InvalidDataType),
     Utf8(Utf8Error),
     Io(io::Error),
-}
-
-impl From<InvalidSDOSize> for CoEError {
-    fn from(value: InvalidSDOSize) -> Self {
-        Self::InvalidSDOSize(value)
-    }
 }
 
 impl From<InvalidCommand> for CoEError {
@@ -84,12 +74,6 @@ impl From<PacketError> for CoEError {
 impl From<AbortError> for CoEError {
     fn from(value: AbortError) -> Self {
         Self::Abort(value)
-    }
-}
-
-impl From<InvalidSyncManagerType> for CoEError {
-    fn from(value: InvalidSyncManagerType) -> Self {
-        Self::InvalidSyncManagerType(value)
     }
 }
 
@@ -133,49 +117,49 @@ impl ServiceData {
 
     pub fn as_bytes(&self) -> &[u8; 512] {
         match self {
-            ServiceData::Byte(bytes) => bytes,
-            ServiceData::Word(words) => bytemuck::cast_ref(words),
-            ServiceData::Long(longs) => bytemuck::cast_ref(longs),
+            Self::Byte(bytes) => bytes,
+            Self::Word(words) => bytemuck::cast_ref(words),
+            Self::Long(longs) => bytemuck::cast_ref(longs),
         }
     }
 
     pub fn as_words(&self) -> &[u16; 256] {
         match self {
-            ServiceData::Byte(bytes) => bytemuck::cast_ref(bytes),
-            ServiceData::Word(words) => words,
-            ServiceData::Long(longs) => bytemuck::cast_ref(longs),
+            Self::Byte(bytes) => bytemuck::cast_ref(bytes),
+            Self::Word(words) => words,
+            Self::Long(longs) => bytemuck::cast_ref(longs),
         }
     }
 
     pub fn as_longs(&self) -> &[u32; 128] {
         match self {
-            ServiceData::Byte(bytes) => bytemuck::cast_ref(bytes),
-            ServiceData::Word(words) => bytemuck::cast_ref(words),
-            ServiceData::Long(longs) => longs,
+            Self::Byte(bytes) => bytemuck::cast_ref(bytes),
+            Self::Word(words) => bytemuck::cast_ref(words),
+            Self::Long(longs) => longs,
         }
     }
 
     pub fn as_bytes_mut(&mut self) -> &mut [u8; 512] {
         match self {
-            ServiceData::Byte(bytes) => bytes,
-            ServiceData::Word(words) => bytemuck::cast_mut(words),
-            ServiceData::Long(longs) => bytemuck::cast_mut(longs),
+            Self::Byte(bytes) => bytes,
+            Self::Word(words) => bytemuck::cast_mut(words),
+            Self::Long(longs) => bytemuck::cast_mut(longs),
         }
     }
 
     pub fn as_words_mut(&mut self) -> &mut [u16; 256] {
         match self {
-            ServiceData::Byte(bytes) => bytemuck::cast_mut(bytes),
-            ServiceData::Word(words) => words,
-            ServiceData::Long(longs) => bytemuck::cast_mut(longs),
+            Self::Byte(bytes) => bytemuck::cast_mut(bytes),
+            Self::Word(words) => words,
+            Self::Long(longs) => bytemuck::cast_mut(longs),
         }
     }
 
     pub fn as_longs_mut(&mut self) -> &mut [u32; 128] {
         match self {
-            ServiceData::Byte(bytes) => bytemuck::cast_mut(bytes),
-            ServiceData::Word(words) => bytemuck::cast_mut(words),
-            ServiceData::Long(longs) => longs,
+            Self::Byte(bytes) => bytemuck::cast_mut(bytes),
+            Self::Word(words) => bytemuck::cast_mut(words),
+            Self::Long(longs) => longs,
         }
     }
 
@@ -254,9 +238,7 @@ impl ServiceDataObject {
         self.write_to(&mut bytes.as_mut_slice()).unwrap();
         bytes
     }
-}
 
-impl ServiceDataObject {
     pub const fn mailbox_header_offset() -> usize {
         0
     }
@@ -350,7 +332,7 @@ pub const MAX_OBJECT_DESCRIPTION_LIST_SIZE: u16 = 1024;
 /// Max entries in Object Entries list
 pub const MAX_OBJECT_ENTRY_LIST_SIZE: usize = 256;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ObjectDescription {
     index: u16,
     data_type: Datatype,
@@ -359,14 +341,118 @@ pub struct ObjectDescription {
     name: HeaplessString<{ MAX_NAME_LENGTH as usize }>,
 }
 
-impl Default for ObjectDescription {
-    fn default() -> Self {
-        Self {
-            index: 0,
-            data_type: Datatype::Invalid,
-            object_code: 0,
-            max_sub: 0,
-            name: HeaplessString::new(),
+impl ObjectDescription {
+    pub const fn index(&self) -> u16 {
+        self.index
+    }
+
+    pub const fn data_type(&self) -> Datatype {
+        self.data_type
+    }
+
+    pub const fn object_code(&self) -> u16 {
+        self.object_code
+    }
+
+    pub const fn max_sub(&self) -> u8 {
+        self.max_sub
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// CANopen over EtherCAT read Object Description. Adds textual information to object indexes.
+    ///
+    /// # Parameters
+    /// - `context`: Context struct
+    /// - `item`: Item number in Object  Description List
+    /// - `od_list`: Referencing Object Description list
+    ///
+    /// # Panics
+    /// Panics if the name of an object entry doesn't fit in the string.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A message couldn't be send/received
+    /// - Received data couldn't be parsed into an object
+    ///
+    /// # Returns
+    /// Unit or error
+    pub fn read(context: &mut Context, slave: u16, index: u16) -> Result<Self, CoEError> {
+        let mut mailbox_in = MailboxIn::default();
+
+        // Clear pending out mailbox in slave if available with timeout set to default.
+        mailbox_in.receive(context, slave, Duration::default())?;
+        let mut mailbox_out = MailboxOut::default();
+        let mut sdo = ServiceDataObjectService::default();
+        *sdo.mailbox_header.length_mut() = Ethercat::from_host(8);
+        *sdo.mailbox_header.address_mut() = Ethercat::from_host(0);
+        *sdo.mailbox_header.priority_mut() = 0;
+
+        // Get new mailbox counter value
+        {
+            *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
+        }
+        // Number 9 bits service upper 4 bits
+        sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12);
+
+        // Get object description request
+        sdo.opcode = COEObjectDescriptionCommand::ObjectDesciptionRequest;
+
+        sdo.reserved = 0;
+
+        // Fragments left
+        sdo.fragments = Ethercat::default();
+
+        // Data of index
+        sdo.data
+            .set_word_compile_time_checked::<0>(Ethercat::from_host(index));
+
+        // Send get request to slave
+        sdo.write_to(&mut mailbox_out)?;
+        mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
+
+        // Read slave response
+        mailbox_in.clear();
+        mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
+
+        let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
+
+        if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
+            && a_sdo.opcode == COEObjectDescriptionCommand::ObjectDesciptionResponse
+        {
+            let object_name_length =
+                (a_sdo.mailbox_header.length().to_host() - 12).min(MAX_NAME_LENGTH);
+            Ok(Self {
+                data_type: Datatype::try_from(u8::try_from(
+                    a_sdo.data.get_word_compile_time_checked::<1>().to_host(),
+                )?)?,
+                object_code: u16::from(a_sdo.data.as_bytes()[5]),
+                max_sub: a_sdo.data.as_bytes()[4],
+                name: HeaplessString::from_utf8(
+                    heapless::Vec::from_slice(
+                        &a_sdo.data.as_bytes()[..usize::from(object_name_length)],
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                index,
+            })
+        } else {
+            // Got unexpected response from slave
+
+            // SDO info error received
+            if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
+                let abort_error = AbortError::Abort(
+                    a_sdo.data.get_long_compile_time_checked::<0>().to_host() as i32,
+                );
+                context.sdo_info_error(slave, index, 0, abort_error);
+                return Err(abort_error.into());
+            }
+            context.packet_error(slave, index, 0, PacketError::UnexpectedFrameReturned);
+            Err(PacketError::UnexpectedFrameReturned.into())
         }
     }
 }
@@ -381,39 +467,354 @@ pub struct ObjectDescriptionList {
     entries: heapless::Vec<ObjectDescription, { MAX_OBJECT_DESCRIPTION_LIST_SIZE as usize }>,
 }
 
-impl Default for ObjectDescriptionList {
-    fn default() -> Self {
-        Self {
-            slave: 0,
-            entries: heapless::Vec::new(),
+impl ObjectDescriptionList {
+    pub const fn slave(&self) -> u16 {
+        self.slave
+    }
+
+    pub fn get_entry(&self, index: u16) -> &ObjectDescription {
+        &self.entries[usize::from(index)]
+    }
+
+    /// CANopen over EtherCAT read Object Description List
+    ///
+    /// # Parameters
+    /// - `context`: context struct
+    /// - `slave`: slave number
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A message couldn't be send/received
+    ///
+    ///
+    /// # Returns
+    /// Unit or error
+    #[expect(clippy::missing_panics_doc, reason = "List size handled manually")]
+    pub fn read(context: &mut Context, slave: u16) -> Result<Self, CoEError> {
+        let mut mailbox_in = MailboxIn::default();
+
+        // Clear pending out mailbox in slave if available with timeout set to 0.
+        mailbox_in.receive(context, slave, Duration::default())?;
+        let mut mailbox_out = MailboxOut::default();
+        let mut sdo = ServiceDataObjectService::default();
+        *sdo.mailbox_header.length_mut() = Ethercat::from_host(8);
+        *sdo.mailbox_header.address_mut() = Ethercat::from_host(0);
+        *sdo.mailbox_header.priority_mut() = 0;
+
+        // Get new mailbox counter value
+        {
+            *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
+        }
+        // Number 9 bits service upper 4 bits
+        sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12);
+
+        // Get object description list request
+        sdo.opcode = COEObjectDescriptionCommand::ObjectDesciptionListRequest;
+        sdo.reserved = 0;
+
+        // Fragments left
+        sdo.fragments = Ethercat::default();
+
+        // All objects
+        sdo.data
+            .set_word_compile_time_checked::<0>(Ethercat::from_host(1));
+
+        // Send get object description list request to slave
+        sdo.write_to(&mut mailbox_out)?;
+        mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
+
+        let mut a_sdo;
+        let mut first = true;
+        let mut sp = 0;
+        let mut entries = heapless::Vec::new();
+        let mut offset = 0;
+        let mut errors = 0;
+        let mut result: Result<(), CoEError> = Ok(());
+        loop {
+            // Assume this is the last iteration
+            let mut stop = true;
+            mailbox_in.clear();
+
+            // Read slave response
+            mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
+            a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
+
+            // Response should be CANopen over EtherCAT and the get object description list response
+            if a_sdo.mailbox_header.mailbox_type() & 0xF
+                == u8::from(MailboxType::CanopenOverEthercat)
+                && a_sdo.opcode == COEObjectDescriptionCommand::ObjectDesciptionListRequest
+            {
+                let mut index_count = if first {
+                    // Extract number of indexes from mailbox data size
+                    (a_sdo.mailbox_header.length().to_host() - (6 + 2)) / 2
+                } else {
+                    (a_sdo.mailbox_header.length().to_host() - 6) / 2
+                };
+
+                // Check if indexes fit in buffer structure
+                if sp + index_count > MAX_OBJECT_DESCRIPTION_LIST_SIZE {
+                    index_count = MAX_OBJECT_DESCRIPTION_LIST_SIZE + 1 - sp;
+                    context.sdo_info_error(slave, 0, 0, AbortError::TooManyMasterBufferEntries);
+                    stop = true;
+                    result = Err(AbortError::TooManyMasterBufferEntries.into());
+                }
+
+                // Trim to maximum number of Object Description list entries defined
+                if entries.len() as u16 + index_count > MAX_OBJECT_DESCRIPTION_LIST_SIZE {
+                    index_count = MAX_OBJECT_DESCRIPTION_LIST_SIZE - entries.len() as u16;
+                }
+                a_sdo.data.as_words()[offset..]
+                    .iter()
+                    .copied()
+                    .map(Ethercat::from_raw)
+                    .map(Ethercat::to_host)
+                    .for_each(|src| {
+                        entries
+                            .push(ObjectDescription {
+                                index: src,
+                                ..Default::default()
+                            })
+                            .unwrap();
+                    });
+                sp += index_count;
+                // Check if more fragments will follow
+                if a_sdo.fragments.to_host() > 0 {
+                    stop = false;
+                }
+                first = false;
+                offset = 0;
+            } else {
+                // Got unexpected response from slave
+                if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
+                    // SDO info error received
+                    let abort_error = AbortError::Abort(
+                        a_sdo.data.get_long_compile_time_checked::<0>().to_host() as i32,
+                    );
+                    context.sdo_info_error(slave, 0, 0, abort_error);
+                    result = Err(abort_error.into());
+                    stop = true;
+                } else {
+                    context.packet_error(slave, 0, 0, PacketError::UnexpectedFrameReturned);
+                }
+                errors += 1;
+            }
+            if errors > 6 || stop {
+                break;
+            }
+        }
+
+        if errors > 6 && result.is_ok() {
+            Err(PacketError::UnexpectedFrameReturned.into())
+        } else if let Err(err) = result {
+            Err(err)
+        } else {
+            Ok(Self { slave, entries })
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ObjectEntry {
+    /// Array of value info, see EtherCAT specification
+    value_info: u8,
+
+    /// Array of value data types, see EtherCAT specification
+    data_type: Datatype,
+
+    /// Array of bit lengths, see EtherCAT specification
+    bit_length: u16,
+
+    /// Array of object access bits, see EtherCAT specification
+    object_access: u16,
+
+    /// Textual description of each index
+    name: HeaplessString<{ MAX_NAME_LENGTH as usize }>,
+}
+
+impl ObjectEntry {
+    pub const fn value_info(&self) -> u8 {
+        self.value_info
+    }
+
+    pub const fn data_type(&self) -> Datatype {
+        self.data_type
+    }
+
+    pub const fn bit_length(&self) -> u16 {
+        self.bit_length
+    }
+
+    pub const fn object_access(&self) -> u16 {
+        self.object_access
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// CANopen read SDO Service object entry, single subindex.
+    /// Used in `read_oe`.
+    ///
+    /// # Parameters
+    /// - `context`: Context struct
+    /// - `item`: Item in Object Description List
+    /// - `sub_index`: Subindex of item in Object Description List
+    /// - `object_description_list`: Object Description list for reference
+    /// - `object_entry_list`: Resulting object entry structure
+    ///
+    /// # Panics
+    /// Panics if the name of an object couldn't be read.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A message couldn't be send/received
+    /// - Read data couldn't be parsed into an object.
+    ///
+    /// # Returns
+    /// Unit or error
+    pub fn read(
+        context: &mut Context,
+        item: u16,
+        object_description_list: &ObjectDescriptionList,
+        sub_index: u8,
+    ) -> Result<Self, CoEError> {
+        let slave = object_description_list.slave;
+        let index = object_description_list.entries[usize::from(item)].index;
+        let mut mailbox_in = MailboxIn::default();
+
+        // Clear pending out mailbox in slave if available, with timeout set to default.
+        mailbox_in.receive(context, slave, Duration::default())?;
+
+        let mut mailbox_out = MailboxOut::default();
+        let mut sdo = ServiceDataObjectService::default();
+        *sdo.mailbox_header.length_mut() = Ethercat::from_host(0xA);
+        *sdo.mailbox_header.address_mut() = Ethercat::from_host(0);
+        *sdo.mailbox_header.priority_mut() = 0;
+
+        // Get new mailbox counter value
+        {
+            *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
+        }
+
+        sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12);
+
+        // Get object entry description request
+        sdo.opcode = COEObjectDescriptionCommand::ObjectEntryRequest;
+        sdo.reserved = 0;
+
+        // Fragments left
+        sdo.fragments = Ethercat::default();
+        sdo.data
+            .set_word_compile_time_checked::<0>(Ethercat::from_host(index));
+        sdo.data.as_bytes_mut()[2] = sub_index;
+        // Get access rights, object category, PDO
+        sdo.data.as_bytes_mut()[3] = 1 + 2 + 4;
+
+        // Send get object entry description request to slave
+        sdo.write_to(&mut mailbox_out)?;
+        mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
+
+        // Read slave response
+        mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
+
+        let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
+
+        if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
+            && a_sdo.opcode == COEObjectDescriptionCommand::ObjectEntryResponse
+        {
+            let object_name_length = usize::from(
+                (a_sdo.mailbox_header.length().to_host() - 16).clamp(0, MAX_NAME_LENGTH),
+            );
+            Ok(Self {
+                value_info: a_sdo.data.as_bytes()[3],
+                data_type: Datatype::try_from(
+                    a_sdo.data.get_word_compile_time_checked::<2>().to_host() as u8,
+                )?,
+                bit_length: a_sdo.data.get_word_compile_time_checked::<3>().to_host(),
+                object_access: a_sdo.data.get_word_compile_time_checked::<4>().to_host(),
+                name: heapless::String::from_utf8(
+                    heapless::Vec::from_slice(&a_sdo.data.as_bytes()[10..10 + object_name_length])
+                        .unwrap(),
+                )?,
+            })
+        } else if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
+            // SDO info error received
+            let abort_error =
+                AbortError::Abort(a_sdo.data.get_long_compile_time_checked::<0>().to_host() as i32);
+            context.sdo_info_error(slave, index, sub_index, abort_error);
+            Err(abort_error.into())
+        } else {
+            let error_code = PacketError::UnexpectedFrameReturned;
+            context.packet_error(slave, index, sub_index, error_code);
+            Err(error_code.into())
         }
     }
 }
 
 /// Storage for object list entry information
-
+#[derive(Debug, Default)]
 pub struct ObjectEntryList {
     /// Number of entries in list
-    entries: u16,
+    entries: heapless::Vec<ObjectEntry, MAX_OBJECT_ENTRY_LIST_SIZE>,
+}
 
-    /// Array of value info, see EtherCAT specification
-    value_info: [u8; MAX_OBJECT_ENTRY_LIST_SIZE],
+impl ObjectEntryList {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
-    /// Array of value data types, see EtherCAT specification
-    data_type: [Datatype; MAX_OBJECT_ENTRY_LIST_SIZE],
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
-    /// Array of bit lengths, see EtherCAT specification
-    bit_length: [u16; MAX_OBJECT_ENTRY_LIST_SIZE],
+    pub fn get(&self, index: usize) -> Option<&ObjectEntry> {
+        self.entries.get(index)
+    }
 
-    /// Array of object access bits, see EtherCAT specification
-    object_access: [u16; MAX_OBJECT_ENTRY_LIST_SIZE],
+    fn push(&mut self, entry: ObjectEntry) -> bool {
+        self.entries.push(entry).is_ok()
+    }
 
-    /// Textual description of each index
-    name: [HeaplessString<{ MAX_NAME_LENGTH as usize }>; MAX_OBJECT_ENTRY_LIST_SIZE],
+    /// CANopen read Service Data Object Service object entry
+    ///
+    /// # Parameters
+    /// - `context`: Context struct
+    /// - `item`: Item in Object Description list
+    /// - `object_description_list`: Object description list for reference
+    /// - `object_entry_list`: Object entry structure
+    ///
+    /// # Panics
+    /// If the name of an object couldn't be read
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - A message couldn't be read/received
+    /// - Read data couldn't be parsed into an object
+    ///
+    /// # Returns Unit or workcounter
+    pub fn read(
+        context: &mut Context,
+        item: u16,
+        object_description_list: &mut ObjectDescriptionList,
+    ) -> Result<Self, CoEError> {
+        (0..object_description_list.entries[usize::from(item)].max_sub).try_fold(
+            Self::default(),
+            |mut object_entry_list, sub_index| {
+                object_entry_list.push(ObjectEntry::read(
+                    context,
+                    item,
+                    object_description_list,
+                    sub_index,
+                )?);
+                Ok(object_entry_list)
+            },
+        )
+    }
 }
 
 /// Stores the received abort error or an unexpected frame error
-#[must_use]
 fn handle_invalid_slave_response(
     a_sdo: &ServiceDataObject,
     context: &mut Context,
@@ -1492,386 +1893,4 @@ pub fn read_pdo_map_complete_access(
     } else {
         Ok(())
     }
-}
-
-/// CANopen over EtherCAT read Object Description List
-///
-/// # Parameters
-/// - `context`: context struct
-/// - `slave`: slave number
-///
-/// # Errors
-/// Returns an error if:
-/// - A message couldn't be send/received
-///
-///
-/// # Returns
-/// Unit or error
-#[expect(clippy::missing_panics_doc, reason = "List size handled manually")]
-pub fn read_od_list(context: &mut Context, slave: u16) -> Result<ObjectDescriptionList, CoEError> {
-    let mut mailbox_in = MailboxIn::default();
-
-    // Clear pending out mailbox in slave if available with timeout set to 0.
-    mailbox_in.receive(context, slave, Duration::default())?;
-    let mut mailbox_out = MailboxOut::default();
-    let mut sdo = ServiceDataObjectService::default();
-    *sdo.mailbox_header.length_mut() = Ethercat::from_host(8);
-    *sdo.mailbox_header.address_mut() = Ethercat::from_host(0);
-    *sdo.mailbox_header.priority_mut() = 0;
-
-    // Get new mailbox counter value
-    {
-        *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
-            + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
-    }
-    // Number 9 bits service upper 4 bits
-    sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12);
-
-    // Get object description list request
-    sdo.opcode = COEObjectDescriptionCommand::ObjectDesciptionListRequest;
-    sdo.reserved = 0;
-
-    // Fragments left
-    sdo.fragments = Ethercat::default();
-
-    // All objects
-    sdo.data
-        .set_word_compile_time_checked::<0>(Ethercat::from_host(1));
-
-    // Send get object description list request to slave
-    sdo.write_to(&mut mailbox_out)?;
-    mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
-
-    let mut a_sdo;
-    let mut first = true;
-    let mut sp = 0;
-    let mut entries = heapless::Vec::new();
-    let mut offset = 0;
-    let mut errors = 0;
-    let mut result: Result<(), CoEError> = Ok(());
-    loop {
-        // Assume this is the last iteration
-        let mut stop = true;
-        mailbox_in.clear();
-
-        // Read slave response
-        mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
-        a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
-
-        // Response should be CANopen over EtherCAT and the get object description list response
-        if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
-            && a_sdo.opcode == COEObjectDescriptionCommand::ObjectDesciptionListRequest
-        {
-            let mut index_count = if first {
-                // Extract number of indexes from mailbox data size
-                (a_sdo.mailbox_header.length().to_host() - (6 + 2)) / 2
-            } else {
-                (a_sdo.mailbox_header.length().to_host() - 6) / 2
-            };
-
-            // Check if indexes fit in buffer structure
-            if sp + index_count > MAX_OBJECT_DESCRIPTION_LIST_SIZE {
-                index_count = MAX_OBJECT_DESCRIPTION_LIST_SIZE + 1 - sp;
-                context.sdo_info_error(slave, 0, 0, AbortError::TooManyMasterBufferEntries);
-                stop = true;
-                result = Err(AbortError::TooManyMasterBufferEntries.into());
-            }
-
-            // Trim to maximum number of Object Description list entries defined
-            if entries.len() as u16 + index_count > MAX_OBJECT_DESCRIPTION_LIST_SIZE {
-                index_count = MAX_OBJECT_DESCRIPTION_LIST_SIZE - entries.len() as u16;
-            }
-            a_sdo.data.as_words()[offset..]
-                .iter()
-                .copied()
-                .map(Ethercat::from_raw)
-                .map(Ethercat::to_host)
-                .for_each(|src| {
-                    entries
-                        .push(ObjectDescription {
-                            index: src,
-                            ..Default::default()
-                        })
-                        .unwrap();
-                });
-            sp += index_count;
-            // Check if more fragments will follow
-            if a_sdo.fragments.to_host() > 0 {
-                stop = false;
-            }
-            first = false;
-            offset = 0;
-        } else {
-            // Got unexpected response from slave
-            if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
-                // SDO info error received
-                let abort_error = AbortError::Abort(
-                    a_sdo.data.get_long_compile_time_checked::<0>().to_host() as i32,
-                );
-                context.sdo_info_error(slave, 0, 0, abort_error);
-                result = Err(abort_error.into());
-                stop = true;
-            } else {
-                context.packet_error(slave, 0, 0, PacketError::UnexpectedFrameReturned);
-            }
-            errors += 1;
-        }
-        if errors > 6 || stop {
-            break;
-        }
-    }
-
-    if errors > 6 && result.is_ok() {
-        Err(PacketError::UnexpectedFrameReturned.into())
-    } else if let Err(err) = result {
-        Err(err)
-    } else {
-        Ok(ObjectDescriptionList { slave, entries })
-    }
-}
-
-/// CANopen over EtherCAT read Object Description. Adds textual information to object indexes.
-///
-/// # Parameters
-/// - `context`: Context struct
-/// - `item`: Item number in Object  Description List
-/// - `od_list`: Referencing Object Description list
-///
-/// # Panics
-/// Panics if the name of an object entry doesn't fit in the string.
-///
-/// # Errors
-/// Returns an error if:
-/// - A message couldn't be send/received
-/// - Received data couldn't be parsed into an object
-///
-/// # Returns
-/// Unit or error
-pub fn read_od_description(
-    context: &mut Context,
-    item: u16,
-    od_list: &mut ObjectDescriptionList,
-) -> Result<(), CoEError> {
-    let slave = od_list.slave;
-    let item = usize::from(item);
-
-    let mut mailbox_in = MailboxIn::default();
-
-    // Clear pending out mailbox in slave if available with timeout set to default.
-    mailbox_in.receive(context, slave, Duration::default())?;
-    let mut mailbox_out = MailboxOut::default();
-    let mut sdo = ServiceDataObjectService::default();
-    *sdo.mailbox_header.length_mut() = Ethercat::from_host(8);
-    *sdo.mailbox_header.address_mut() = Ethercat::from_host(0);
-    *sdo.mailbox_header.priority_mut() = 0;
-
-    // Get new mailbox counter value
-    {
-        *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
-            + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
-    }
-    // Number 9 bits service upper 4 bits
-    sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12);
-
-    // Get object description request
-    sdo.opcode = COEObjectDescriptionCommand::ObjectDesciptionRequest;
-
-    sdo.reserved = 0;
-
-    // Fragments left
-    sdo.fragments = Ethercat::default();
-
-    // Data of index
-    sdo.data
-        .set_word_compile_time_checked::<0>(Ethercat::from_host(od_list.entries[item].index));
-
-    // Send get request to slave
-    sdo.write_to(&mut mailbox_out)?;
-    mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
-
-    // Read slave response
-    mailbox_in.clear();
-    mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
-
-    let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
-
-    if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
-        && a_sdo.opcode == COEObjectDescriptionCommand::ObjectDesciptionResponse
-    {
-        let object_name_length =
-            (a_sdo.mailbox_header.length().to_host() - 12).min(MAX_NAME_LENGTH);
-        od_list.entries[item].data_type = Datatype::try_from(u8::try_from(
-            a_sdo.data.get_word_compile_time_checked::<1>().to_host(),
-        )?)?;
-        od_list.entries[item].object_code = u16::from(a_sdo.data.as_bytes()[5]);
-        od_list.entries[item].max_sub = a_sdo.data.as_bytes()[4];
-        od_list.entries[item].name.clear();
-        od_list.entries[item]
-            .name
-            .push_str(str::from_utf8(
-                &a_sdo.data.as_bytes()[..usize::from(object_name_length)],
-            )?)
-            .unwrap();
-    } else {
-        // Got unexpected response from slave
-
-        // SDO info error received
-        if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
-            let abort_error =
-                AbortError::Abort(a_sdo.data.get_long_compile_time_checked::<0>().to_host() as i32);
-            context.sdo_info_error(slave, od_list.entries[item].index, 0, abort_error);
-            return Err(abort_error.into());
-        }
-        context.packet_error(
-            slave,
-            od_list.entries[item].index,
-            0,
-            PacketError::UnexpectedFrameReturned,
-        );
-        return Err(PacketError::UnexpectedFrameReturned.into());
-    }
-    Ok(())
-}
-
-/// CANopen read SDO Service object entry, single subindex.
-/// Used in `read_oe`.
-///
-/// # Parameters
-/// - `context`: Context struct
-/// - `item`: Item in Object Description List
-/// - `sub_index`: Subindex of item in Object Description List
-/// - `object_description_list`: Object Description list for reference
-/// - `object_entry_list`: Resulting object entry structure
-///
-/// # Panics
-/// Panics if the name of an object couldn't be read.
-///
-/// # Errors
-/// Returns an error if:
-/// - A message couldn't be send/received
-/// - Read data couldn't be parsed into an object.
-///
-/// # Returns
-/// Unit or error
-pub fn read_oe_single(
-    context: &mut Context,
-    item: u16,
-    sub_index: u8,
-    object_description_list: &mut ObjectDescriptionList,
-    object_entry_list: &mut ObjectEntryList,
-) -> Result<(), CoEError> {
-    let slave = object_description_list.slave;
-    let index = object_description_list.entries[usize::from(item)].index;
-    let mut mailbox_in = MailboxIn::default();
-
-    // Clear pending out mailbox in slave if available, with timeout set to default.
-    mailbox_in.receive(context, slave, Duration::default())?;
-
-    let mut mailbox_out = MailboxOut::default();
-    let mut sdo = ServiceDataObjectService::default();
-    *sdo.mailbox_header.length_mut() = Ethercat::from_host(0xA);
-    *sdo.mailbox_header.address_mut() = Ethercat::from_host(0);
-    *sdo.mailbox_header.priority_mut() = 0;
-
-    // Get new mailbox counter value
-    {
-        *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
-            + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
-    }
-
-    sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12);
-
-    // Get object entry description request
-    sdo.opcode = COEObjectDescriptionCommand::ObjectEntryRequest;
-    sdo.reserved = 0;
-
-    // Fragments left
-    sdo.fragments = Ethercat::default();
-    sdo.data
-        .set_word_compile_time_checked::<0>(Ethercat::from_host(index));
-    sdo.data.as_bytes_mut()[2] = sub_index;
-    // Get access rights, object category, PDO
-    sdo.data.as_bytes_mut()[3] = 1 + 2 + 4;
-
-    // Send get object entry description request to slave
-    sdo.write_to(&mut mailbox_out)?;
-    mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
-
-    // Read slave response
-    mailbox_in.receive(context, slave, TIMEOUT_RX_MAILBOX)?;
-
-    let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
-
-    if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
-        && a_sdo.opcode == COEObjectDescriptionCommand::ObjectEntryResponse
-    {
-        object_entry_list.entries += 1;
-        let object_name_length =
-            usize::from((a_sdo.mailbox_header.length().to_host() - 16).clamp(0, MAX_NAME_LENGTH));
-        let sub_index = usize::from(sub_index);
-        object_entry_list.value_info[sub_index] = a_sdo.data.as_bytes()[3];
-        object_entry_list.data_type[sub_index] =
-            Datatype::try_from(a_sdo.data.get_word_compile_time_checked::<2>().to_host() as u8)?;
-        object_entry_list.bit_length[sub_index] =
-            a_sdo.data.get_word_compile_time_checked::<3>().to_host();
-        object_entry_list.object_access[sub_index] =
-            a_sdo.data.get_word_compile_time_checked::<4>().to_host();
-        object_entry_list.name[sub_index].clear();
-        #[expect(
-            clippy::string_from_utf8_as_bytes,
-            reason = "Not converted from string!"
-        )]
-        object_entry_list.name[sub_index]
-            .push_str(str::from_utf8(
-                &a_sdo.data.as_bytes()[10..10 + object_name_length],
-            )?)
-            .unwrap();
-        Ok(())
-    } else if a_sdo.opcode == COEObjectDescriptionCommand::ServiceDataObjectInformationError {
-        // SDO info error received
-        let abort_error =
-            AbortError::Abort(a_sdo.data.get_long_compile_time_checked::<0>().to_host() as i32);
-        context.sdo_info_error(slave, index, sub_index, abort_error);
-        Err(abort_error.into())
-    } else {
-        let error_code = PacketError::UnexpectedFrameReturned;
-        context.packet_error(slave, index, sub_index, error_code);
-        Err(error_code.into())
-    }
-}
-
-/// CANopen read Service Data Object Service object entry
-///
-/// # Parameters
-/// - `context`: Context struct
-/// - `item`: Item in Object Description list
-/// - `object_description_list`: Object description list for reference
-/// - `object_entry_list`: Object entry structure
-///
-/// # Panics
-/// If the name of an object couldn't be read
-///
-/// # Errors
-/// Returns an error if:
-/// - A message couldn't be read/received
-/// - Read data couldn't be parsed into an object
-///
-/// # Returns Unit or workcounter
-pub fn read_oe(
-    context: &mut Context,
-    item: u16,
-    object_description_list: &mut ObjectDescriptionList,
-    object_entry_list: &mut ObjectEntryList,
-) -> Result<(), CoEError> {
-    object_entry_list.entries = 0;
-    for sub_count in 0..object_description_list.entries[usize::from(item)].max_sub {
-        read_oe_single(
-            context,
-            item,
-            sub_count,
-            object_description_list,
-            object_entry_list,
-        )?;
-    }
-    Ok(())
 }
