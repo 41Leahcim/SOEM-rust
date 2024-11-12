@@ -22,23 +22,18 @@
 //! If needed, the packets from interface A are resent through interface B.
 //! This layer is fully transparent from the highest layers.
 
-use std::{
-    array, io,
-    mem::zeroed,
-    ptr::{self, NonNull},
-    time::Duration,
-};
+use std::{array, io, mem::zeroed, ptr, time::Duration};
 
 use crate::{
     ethercat::{
         r#type::{
-            Buffer, BufferState, EthercatHeader, EthercatHeaderError, EthernetHeader, ETH_P_ECAT,
-            MAX_BUFFER_COUNT, TIMEOUT_RETURN,
+            Buffer, BufferState, EthercatHeader, EthercatHeaderError, EthernetHeader, BUFFER_SIZE,
+            ETH_P_ECAT, MAX_BUFFER_COUNT, TIMEOUT_RETURN,
         },
         ReadFrom,
     },
     osal::OsalTimer,
-    safe_c::CError,
+    safe_c::{CError, ReceiveError, ReceiveFlags, SendError, SendFlags, Socket},
 };
 
 use super::Network;
@@ -180,7 +175,7 @@ impl Default for Stack {
 /// EtherCAT eXtended Pointer structure to buffers for redundant port
 pub struct RedPort {
     stack: Stack,
-    sockhandle: i32,
+    sockhandle: Socket,
 
     /// Receive MAC source address
     rx_source_address: [i32; MAX_BUFFER_COUNT],
@@ -198,17 +193,10 @@ impl RedPort {
     }
 }
 
-impl Drop for RedPort {
-    fn drop(&mut self) {
-        use crate::safe_c::close;
-        close(self.sockhandle).unwrap();
-    }
-}
-
 /// Ethercat eXtended pointer structure to buffers, variables, and mutexes for port instantiation
 pub struct Port {
     stack: Stack,
-    sockhandle: i32,
+    sockhandle: Socket,
 
     /// Receive MAC source address
     rx_source_address: [i32; MAX_BUFFER_COUNT],
@@ -245,17 +233,17 @@ impl Port {
     /// - `interface_name`: Name of NIC device, f.e. "eth0"
     /// - `redundant`: if true, add redundant port
     ///
-    /// # Panics
-    /// Panics if:
-    /// - `rx_buf_stat` mutex of the redundant port couldn't be locked
-    /// - `tx_buffers` mutex of port couldn't be locked
-    ///
     /// # Errors
     /// Returns an error if the socket couldn't be initialized.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "EthernetHeader is at compile time checked to be smaller than the buffer size."
+    )]
     pub fn setup_nic(
         interface_name: &str,
         redundancy_mode: RedundancyMode,
     ) -> Result<Self, NicdrvError> {
+        const _: () = assert!(EthernetHeader::size() < BUFFER_SIZE);
         let redport = if let RedundancyMode::Redundant(interface_name) = redundancy_mode {
             Some(RedPort::new(interface_name)?)
         } else {
@@ -282,9 +270,6 @@ impl Port {
     /// - `self`: Port context struct
     /// - `index`: index in buffer array
     /// - `bufstat`: status to set
-    ///
-    /// # Panics
-    /// Panics if the buffer state mutex of the port or redundant port couldn't be locked.
     pub fn set_buf_stat(&mut self, index: usize, bufstat: BufferState) {
         self.stack.rx_buffers[index].state = bufstat;
         if let Some(redport) = self.redport.as_mut() {
@@ -296,9 +281,6 @@ impl Port {
     ///
     /// # Parameters
     /// - `self`: port context struct
-    ///
-    /// # Panics
-    /// Panics if the `rx_buf_stat` of the port or redundant port couldn't be locked
     ///
     /// # Returns
     /// New index
@@ -338,11 +320,11 @@ impl Port {
         }
     }
 
-    fn get_socket(&self, secondary: bool) -> i32 {
+    fn get_socket(&self, secondary: bool) -> &Socket {
         if let Some(redport) = self.redport.as_ref().filter(|_| secondary) {
-            redport.sockhandle
+            &redport.sockhandle
         } else {
-            self.sockhandle
+            &self.sockhandle
         }
     }
 
@@ -361,23 +343,31 @@ impl Port {
     /// - `index`: index in tx buffer array
     /// - `secondary`: false=primary, true=secondary (if available)
     ///
-    /// # Panics
-    /// Panics if the mutex of the rx_buf_stat of the requested stack couldn't be locked
+    /// # Errors
+    /// Returns an error on failure to send the data.
     ///
     /// # Returns
     /// Socket send result
-    pub fn out_frame(&mut self, index: usize, secondary: bool) -> i32 {
-        let socket = self.get_socket(secondary);
-        let stack = self.get_stack_mut(secondary);
-        stack.rx_buffers[index].state = BufferState::Tx;
-        let tx_buffer = &mut stack.tx_buffer;
-        let buffer: &[u8] = tx_buffer[index].as_ref();
-        let rval = unsafe { libc::send(socket, ptr::from_ref(buffer).cast(), buffer.len(), 0) };
-        if rval == -1 {
-            stack.rx_buffers[index].state = BufferState::Empty;
+    pub fn out_frame(&mut self, index: usize, secondary: bool) -> Result<usize, SendError> {
+        if let Some(redport) = self.redport.as_mut().filter(|_| secondary) {
+            redport.stack.rx_buffers[index].state = BufferState::Tx;
+            let rval = redport
+                .sockhandle
+                .send(&redport.stack.tx_buffer[index], SendFlags::new());
+            if rval.is_err() {
+                redport.stack.rx_buffers[index].state = BufferState::Empty;
+            }
+            rval
+        } else {
+            self.stack.rx_buffers[index].state = BufferState::Tx;
+            let rval = self
+                .sockhandle
+                .send(&self.stack.tx_buffer[index], SendFlags::new());
+            if rval.is_err() {
+                self.stack.rx_buffers[index].state = BufferState::Empty;
+            }
+            rval
         }
-
-        rval as i32
     }
 
     /// Transmit buffer over socket (non blocking)
@@ -386,10 +376,6 @@ impl Port {
     /// - `self`: port context struct
     /// - `index`: index in tx buffer array
     ///
-    /// # Panics
-    /// Panics if the `tx_buffers` or `temp_tx_buffer` mutex of port. or the rx_buf_stat of
-    /// redundant port couldn't be locked.
-    ///
     /// # Errors
     /// Returns an error if:
     /// - No `EthernetHeader` could be created from the `tx_buffers` at `index`.
@@ -397,7 +383,7 @@ impl Port {
     ///
     /// # Returns
     /// Socket send result
-    pub fn out_frame_red(&mut self, index: u8) -> Result<i32, NicdrvError> {
+    pub fn out_frame_red(&mut self, index: u8) -> Result<usize, NicdrvError> {
         let mut ehp =
             EthernetHeader::read_from(&mut self.stack.tx_buffer[usize::from(index)].as_slice())?;
 
@@ -410,7 +396,7 @@ impl Port {
         // Transmit over primary socket
         let rval = self.out_frame(index.into(), false);
 
-        if self.redport.is_some() {
+        if let Some(redport) = self.redport.as_mut() {
             let tmp_buffer = &mut self.stack.tx_buffer[self.stack.temp_tx_buf];
             let mut ehp = EthernetHeader::read_from(&mut tmp_buffer.as_slice())?;
 
@@ -427,21 +413,16 @@ impl Port {
             tmp_buffer[EthernetHeader::size()..].copy_from_slice(&datagram.bytes()?);
 
             // Transmit over secondary socket
-            let redport = self.redport.as_mut().unwrap();
             redport.stack.rx_buffers[usize::from(index)].state = BufferState::Tx;
-            if unsafe {
-                libc::send(
-                    redport.sockhandle,
-                    tmp_buffer.as_ptr().cast(),
-                    tmp_buffer.len(),
-                    0,
-                )
-            } == -1
+            if redport
+                .sockhandle
+                .send(tmp_buffer, SendFlags::new())
+                .is_err()
             {
                 redport.stack.rx_buffers[usize::from(index)].state = BufferState::Empty;
             }
         }
-        Ok(rval)
+        rval.map_err(CError::from).map_err(NicdrvError::from)
     }
 
     /// Non blocking read of socket. Put frame in temporary buffer.
@@ -450,27 +431,31 @@ impl Port {
     /// - `self`: port context struct
     /// - `secondary`: false=primary true=secondary stack (if available)
     ///
-    /// # Panics
-    /// Panics if the mutex of the `temp_buf` of the selected stack couldn't be locked.
-    pub fn receive_packet(&mut self, secondary: bool) -> bool {
-        let socket = self.get_socket(secondary);
-        let temp_rx_buffer = self.stack.temp_rx_buf;
-        let stack = self.get_stack_mut(secondary);
-        let temp_buf = &mut stack.rx_buffers[temp_rx_buffer];
-        let bytesrx = unsafe {
-            libc::recv(
-                socket,
-                temp_buf.data.as_mut_ptr().cast(),
-                temp_buf.data.len(),
-                0,
-            )
-        };
-        self.stack.rx_buffers[self.stack.temp_rx_buf].state = if bytesrx == 0 {
-            BufferState::Empty
+    /// # Errors
+    /// Returns an erro on failure to receive the data
+    pub fn receive_packet(&mut self, secondary: bool) -> Result<bool, ReceiveError> {
+        if let Some(redport) = self.redport.as_mut().filter(|_| secondary) {
+            let bytes_received = redport.sockhandle.receive(
+                &mut redport.stack.temp_rx_buf_mut().data,
+                ReceiveFlags::new(),
+            )?;
+            redport.stack.rx_buffers[self.stack.temp_rx_buf].state = if bytes_received == 0 {
+                BufferState::Empty
+            } else {
+                BufferState::Alloc
+            };
+            Ok(bytes_received > 0)
         } else {
-            BufferState::Alloc
-        };
-        bytesrx > 0
+            let bytes_received = self
+                .sockhandle
+                .receive(&mut self.stack.temp_rx_buf_mut().data, ReceiveFlags::new())?;
+            self.stack.rx_buffers[self.stack.temp_rx_buf].state = if bytes_received == 0 {
+                BufferState::Empty
+            } else {
+                BufferState::Alloc
+            };
+            Ok(bytes_received > 0)
+        }
     }
 
     /// Non blocking receive frame function. Uses RX buffer and index to combine
@@ -492,7 +477,7 @@ impl Port {
     ///
     /// # Panics
     /// Panics if:
-    /// - The `rx_buf_stat`, `temp_buf`, or `rx_buffers` mutex of the selected stack couldn't be locked
+    /// - The found index is equal to the temporary buffer index
     ///
     /// # Errors
     /// Returns an error if:
@@ -517,7 +502,7 @@ impl Port {
             rval = Ok(u16::from(rxbuf[l]) + (u16::from(rxbuf[l + 1]) << 8));
             self.get_stack_mut(secondary).rx_buffers[usize::from(index)].state =
                 BufferState::Complete;
-        } else if self.receive_packet(secondary) {
+        } else if self.receive_packet(secondary).map_err(CError::from)? {
             rval = Err(NicdrvError::OtherFrame);
             let stack = self.get_stack_mut(secondary);
             let temp_buf = stack.temp_rx_buf;
@@ -597,9 +582,6 @@ impl Port {
     /// - `index`: requested index of frame
     /// - `timer`: Absolute timeout time
     ///
-    /// # Panics
-    /// Panics if the `rx_source_address` or `rx_buf` can't be locked
-    ///
     /// # Errors
     /// Returns an error if no frame could be send/received
     ///
@@ -678,7 +660,8 @@ impl Port {
             let timer2 = OsalTimer::new(TIMEOUT_RETURN);
 
             // Resend secondary tx
-            self.out_frame(usize::from(index), true);
+            self.out_frame(usize::from(index), true)
+                .map_err(CError::from)?;
 
             loop {
                 wkc2 = self.inframe(index, true);
@@ -754,62 +737,31 @@ impl Port {
     }
 }
 
-impl Drop for Port {
-    fn drop(&mut self) {
-        use crate::safe_c::close;
-        close(self.sockhandle).unwrap();
-    }
-}
-
 /// Initializes the EtherCAT socket
-fn initialize_socket(interface_name: &str) -> Result<i32, CError> {
-    use crate::{
-        ioctl,
-        safe_c::{setsockopt, socket},
-    };
+fn initialize_socket(interface_name: &str) -> Result<Socket, CError> {
+    use crate::safe_c::{CBool, SocketOption};
     use libc::{
-        bind, ifreq, sockaddr_ll, timeval, AF_PACKET, IFF_BROADCAST, IFF_PROMISC, PF_PACKET,
-        SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, SOCK_RAW, SOL_SOCKET, SO_DONTROUTE, SO_RCVTIMEO,
-        SO_SNDTIMEO,
+        ifreq, sockaddr_ll, timeval, AF_PACKET, IFF_BROADCAST, IFF_PROMISC, PF_PACKET,
+        SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, SOCK_RAW,
     };
 
     // Use a raw socket with packet type ETH_P_ECAT
-    let socket = socket(
-        PF_PACKET,
-        SOCK_RAW,
-        Network::from_host(ETH_P_ECAT).into_inner().into(),
-    )?;
-
-    let mut timeout = timeval {
+    let timeout = timeval {
         tv_sec: 0,
         tv_usec: 1,
     };
-    let timeout_ptr = NonNull::new(ptr::from_mut(&mut timeout).cast()).unwrap();
-    setsockopt(
-        socket,
-        SOL_SOCKET,
-        SO_RCVTIMEO,
-        timeout_ptr,
-        size_of::<timeval>() as u32,
-    )?;
-    setsockopt(
-        socket,
-        SOL_SOCKET,
-        SO_SNDTIMEO,
-        timeout_ptr,
-        size_of::<timeval>() as u32,
-    )?;
-    let mut i = 1;
-    setsockopt(
-        socket,
-        SOL_SOCKET,
-        SO_DONTROUTE,
-        NonNull::new(ptr::from_mut(&mut i).cast()).unwrap(),
-        size_of::<i32>() as u32,
-    )?;
+    let mut socket = Socket::builder(
+        PF_PACKET,
+        SOCK_RAW,
+        Network::from_host(i32::from(ETH_P_ECAT)),
+    )?
+    .set_option(SocketOption::ReceiveTimeout(timeout))?
+    .set_option(SocketOption::SendTimeout(timeout))?
+    .set_option(SocketOption::DoNotRoute(CBool::new(true)))?;
 
     // Connect socket to NIC by name
     let mut interface_name_bytes = interface_name.bytes().map(|value| value as i8);
+    #[expect(unsafe_code)]
     let mut interface = ifreq {
         ifr_name: array::from_fn(|_| interface_name_bytes.next().unwrap_or_default()),
         ifr_ifru: unsafe { zeroed() },
@@ -817,43 +769,41 @@ fn initialize_socket(interface_name: &str) -> Result<i32, CError> {
     assert_eq!(interface_name_bytes.next(), None, "Interface name too long");
     let interface_name = interface.ifr_name;
 
-    ioctl!(
-        socket,
-        SIOCGIFINDEX,
-        (ptr::from_mut(&mut interface).cast::<ifreq>())
-    )?;
+    socket = socket.ioctl(SIOCGIFINDEX, ptr::from_mut(&mut interface).cast::<ifreq>())?;
+    #[expect(unsafe_code)]
     let ifindex = unsafe { interface.ifr_ifru.ifru_ifindex };
     interface.ifr_name = interface_name;
     interface.ifr_ifru.ifru_flags = 0;
 
     // Reset flags of NIC interface
-    ioctl!(
-        socket,
-        SIOCGIFFLAGS,
-        (ptr::from_mut(&mut interface).cast::<ifreq>())
-    )?;
+    socket = socket.ioctl(SIOCGIFFLAGS, ptr::from_mut(&mut interface).cast::<ifreq>())?;
 
     // Set flags of NIC interface, here promiscuous and broadcast
-    unsafe { interface.ifr_ifru.ifru_flags |= (IFF_PROMISC | IFF_BROADCAST) as i16 };
-    ioctl!(
-        socket,
-        SIOCSIFFLAGS,
-        (ptr::from_mut(&mut interface).cast::<ifreq>())
-    )?;
+    #[expect(unsafe_code)]
+    unsafe {
+        interface.ifr_ifru.ifru_flags |= (IFF_PROMISC | IFF_BROADCAST) as i16;
+    }
+    socket = socket.ioctl(SIOCSIFFLAGS, ptr::from_mut(&mut interface).cast::<ifreq>())?;
 
     // Bind socket to protocol, in this case RAW EtherCAT
+    #[expect(unsafe_code)]
     let sll = sockaddr_ll {
         sll_family: AF_PACKET as u16,
         sll_ifindex: ifindex,
         sll_protocol: Network::from_host(ETH_P_ECAT).into_inner(),
         ..unsafe { zeroed() }
     };
-    unsafe {
-        bind(
-            socket,
-            ptr::from_ref(&sll).cast(),
+
+    #[expect(unsafe_code)]
+    socket
+        .bind(
+            unsafe {
+                ptr::from_ref(&sll)
+                    .cast::<libc::sockaddr>()
+                    .as_ref()
+                    .unwrap()
+            },
             size_of::<sockaddr_ll>() as u32,
         )
-    };
-    Ok(socket)
+        .map_err(CError::from)
 }

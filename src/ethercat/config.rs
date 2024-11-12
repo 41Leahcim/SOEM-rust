@@ -685,7 +685,6 @@ fn configure_sync_manager(
 /// - Failed to set node address of slave
 /// - Failed to set behaviour of slave when it receives a non-ecat frame
 /// - Failed to initiate a parallel EEPROM request
-/// -
 ///
 /// # Returns
 /// Number of slaves found or error

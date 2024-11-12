@@ -486,7 +486,6 @@ impl ObjectDescriptionList {
     /// Returns an error if:
     /// - A message couldn't be send/received
     ///
-    ///
     /// # Returns
     /// Unit or error
     #[expect(clippy::missing_panics_doc, reason = "List size handled manually")]

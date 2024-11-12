@@ -564,7 +564,7 @@ pub fn read(
 /// `timeout`: Timeout duration, standard is `TIMEOUT_RX_MAILBOX`
 ///
 /// # Panics
-/// - If an invalid was received
+/// - If an invalid mailbox header length was received
 ///
 /// # Errors
 /// Returns an error if:

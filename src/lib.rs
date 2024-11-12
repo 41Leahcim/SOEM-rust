@@ -2,7 +2,8 @@
     clippy::todo,
     clippy::missing_const_for_fn,
     clippy::pedantic,
-    clippy::use_self
+    clippy::use_self,
+    unsafe_code
 )]
 #![expect(
     clippy::doc_markdown,

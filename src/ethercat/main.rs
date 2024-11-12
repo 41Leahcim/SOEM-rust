@@ -8,9 +8,8 @@
 
 use std::{
     array,
-    ffi::CStr,
     io::{self, Read, Write},
-    str::{FromStr, Utf8Error},
+    str::Utf8Error,
     thread,
     time::{Duration, SystemTime},
 };
@@ -36,7 +35,7 @@ use crate::{
         eoe::{header_frame_type_get, EoEFrameType},
         r#type::{
             high_byte, high_word, low_word, BufferState, EepromCommand, EthercatRegister,
-            EthernetHeader, MailboxType, EEPROM_STATE_MACHINE_ERROR_MASK,
+            EthernetHeader, MailboxType, BUFFER_SIZE, EEPROM_STATE_MACHINE_ERROR_MASK,
             EEPROM_STATE_MACHINE_ERROR_NACK, EEPROM_STATE_MACHINE_READ64,
             ETHERCAT_WORK_COUNTER_SIZE, MAX_EEPROM_BUFFER_SIZE, SII_START, TIMEOUT_EEPROM,
             TIMEOUT_RETURN3,
@@ -129,8 +128,8 @@ impl From<Utf8Error> for MainError {
 
 /// EtherCAT Adapter
 pub struct Adapter {
-    name: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
-    desc: HeaplessString<MAX_ADAPTER_NAME_LENGTH>,
+    name: String,
+    desc: String,
 }
 
 /// Create list of available network adapters
@@ -146,20 +145,17 @@ impl Adapter {
     /// # Returns
     /// First element in linked list of adapters
     pub fn find_adapters() -> Vec<Self> {
-        use libc::if_nameindex;
+        use crate::safe_c::if_nameindex;
         // Iterate all devices and create a local copy holding the name and description
-        let ids = unsafe { if_nameindex() };
-        (0..usize::MAX)
-            .filter_map(|i| unsafe { ids.add(i).as_mut() })
-            .take_while(|id| id.if_index != 0)
+        if_nameindex()
+            .take_while(|id| id.index != 0)
             .map(|id| {
                 // Fetch description and name, in Linux they are the same.
-                let name = heapless::String::from_str(
-                    unsafe { CStr::from_ptr(id.if_name) }.to_str().unwrap(),
-                )
-                .unwrap();
-                let desc = name.clone();
-                Self { name, desc }
+                let desc = id.name.clone();
+                Self {
+                    name: id.name,
+                    desc,
+                }
             })
             .collect()
     }
@@ -2634,11 +2630,6 @@ impl<'context> Context<'context> {
     /// - `interface_name`: Primary device name f.e. "etho"
     /// - `interface_name2`: Secondary device name, f.e. "eth1"
     ///
-    /// # Panics
-    /// Panics if:
-    /// - The `tx_buffer` couldn't be locked
-    /// - The `temp_tx_buffer` couldn't be locked
-    ///
     /// # Errors
     /// Returns an error if:
     /// - The NIC couldn't be setup
@@ -2646,10 +2637,18 @@ impl<'context> Context<'context> {
     ///
     /// # Returns
     /// `Ok(())` or error
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "New buffer size is checked at compile time"
+    )]
     pub fn init_redundant(
         interface_name: &str,
         interface_name2: &str,
     ) -> Result<Self, ConfigError> {
+        const _: () = assert!(
+            EthernetHeader::size() + EthernetHeader::size() + ETHERCAT_WORK_COUNTER_SIZE + 2
+                < BUFFER_SIZE
+        );
         let mut port = Port::setup_nic(interface_name, RedundancyMode::Redundant(interface_name2))?;
 
         // Prepare "dummy" broadcat read tx frame for redundant operation

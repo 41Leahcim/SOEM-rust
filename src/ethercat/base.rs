@@ -786,9 +786,6 @@ pub fn lwr(
 /// # Errors
 /// Will return an error when it fails to send the data or didn't receive a reply.
 ///
-/// # Panics
-/// If the tx_buffers mutex can't be locked (is poisoned)
-///
 /// # Returns
 /// Workcounter or error
 pub fn lrwdc(
@@ -826,7 +823,7 @@ pub fn lrwdc(
         )
     };
 
-    let mut wkc = port.src_confirm(index, timeout).unwrap();
+    let mut wkc = port.src_confirm(index, timeout)?;
     {
         let rx_buffer = &mut port.stack().rx_buffers()[usize::from(index)].data();
         if rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into() {
