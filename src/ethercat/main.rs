@@ -200,16 +200,16 @@ impl<R: Read> ReadFrom<R> for Fmmu {
     type Err = MainError;
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
-        let log_start = Ethercat::<u32>::from_bytes(Self::read_bytes(reader)?);
-        let log_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let log_start_bit = Self::read_byte(reader)?;
-        let log_end_bit = Self::read_byte(reader)?;
-        let physical_start = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let physical_start_bit = Self::read_byte(reader)?;
-        let fmmu_type = Self::read_byte(reader)?;
-        let fmmu_active = Self::read_byte(reader)? != 0;
-        let _unused = Self::read_byte(reader)?;
-        let _unused2 = Self::read_byte(reader)?;
+        let log_start = Ethercat::<u32>::from_bytes(<[u8; 4]>::read_from(reader)?);
+        let log_length = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let log_start_bit = u8::read_from(reader)?;
+        let log_end_bit = u8::read_from(reader)?;
+        let physical_start = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let physical_start_bit = u8::read_from(reader)?;
+        let fmmu_type = u8::read_from(reader)?;
+        let fmmu_active = u8::read_from(reader)? != 0;
+        let _unused = u8::read_from(reader)?;
+        let _unused2 = u8::read_from(reader)?;
         Ok(Self {
             log_start,
             log_length,
@@ -332,9 +332,9 @@ impl<R: Read> ReadFrom<R> for SyncManager {
     type Err = io::Error;
 
     fn read_from(reader: &mut R) -> io::Result<Self> {
-        let start_address = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let sm_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let sm_flags = Ethercat::<u32>::from_bytes(Self::read_bytes(reader)?);
+        let start_address = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let sm_length = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let sm_flags = Ethercat::<u32>::from_bytes(<[u8; 4]>::read_from(reader)?);
         Ok(Self {
             start_address,
             sm_length,
@@ -2065,9 +2065,9 @@ impl<R: Read> ReadFrom<R> for ApplicationLayerStatus {
     type Err = io::Error;
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
-        let status = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let _unused = Self::read_bytes::<2>(reader)?;
-        let code = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let status = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let _unused = <[u8; 2]>::read_from(reader)?;
+        let code = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         Ok(Self {
             status,
             unused: (),
@@ -2241,11 +2241,11 @@ impl<R: Read> ReadFrom<R> for PdoAssign {
     type Err = io::Error;
 
     fn read_from(reader: &mut R) -> io::Result<Self> {
-        let number = Self::read_byte(reader)?;
-        let null = Self::read_byte(reader)?;
+        let number = u8::read_from(reader)?;
+        let null = u8::read_from(reader)?;
         let index = (0..256).try_fold([Ethercat::default(); 256], |result, index| {
             let mut result = result;
-            result[index] = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+            result[index] = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
             Ok::<_, io::Error>(result)
         })?;
         Ok(Self {
@@ -2269,6 +2269,10 @@ impl PdoDescription {
         &mut self.number
     }
 
+    pub const fn number(&self) -> u8 {
+        self.number
+    }
+
     pub const fn pdo(&self) -> &[Ethercat<u32>; 256] {
         &self.pdo
     }
@@ -2282,11 +2286,11 @@ impl<R: Read> ReadFrom<R> for PdoDescription {
     type Err = io::Error;
 
     fn read_from(reader: &mut R) -> io::Result<Self> {
-        let number = Self::read_byte(reader)?;
-        let null = Self::read_byte(reader)?;
+        let number = u8::read_from(reader)?;
+        let null = u8::read_from(reader)?;
         let pdo = (0..256).try_fold([Ethercat::default(); 256], |result, index| {
             let mut result = result;
-            result[index] = Ethercat::<u32>::from_bytes(Self::read_bytes(reader)?);
+            result[index] = Ethercat::<u32>::from_bytes(<[u8; 4]>::read_from(reader)?);
             Ok::<_, io::Error>(result)
         })?;
         Ok(Self { number, null, pdo })
@@ -4193,12 +4197,12 @@ impl<R: Read> ReadFrom<R> for EmergencyRequest {
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
-        let can_open = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let error_code = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let error_register = Self::read_byte(reader)?;
-        let byte_data = Self::read_byte(reader)?;
-        let word1 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let word2 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let can_open = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let error_code = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let error_register = u8::read_from(reader)?;
+        let byte_data = u8::read_from(reader)?;
+        let word1 = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let word2 = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         Ok(Self {
             mailbox_header,
             can_open,

@@ -369,10 +369,10 @@ impl<R: Read> ReadFrom<R> for EthernetOverEthercat {
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
-        let frame_info1 = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let frame_info1 = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         let info_result =
-            InfoResult::FrameInfo2(Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?));
-        let data = Self::read_bytes(reader)?;
+            InfoResult::FrameInfo2(Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?));
+        let data = <[u8; 1476]>::read_from(reader)?;
         Ok(Self {
             mailbox_header,
             frame_info1,

@@ -1008,7 +1008,7 @@ pub fn map_coe_soe(
                 &mut input_size,
             ) {
                 Err(e) => return Err(e),
-                Ok(()) => initialized = true,
+                Ok(_) => initialized = true,
             }
         }
 

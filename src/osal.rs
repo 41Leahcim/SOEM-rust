@@ -13,10 +13,6 @@ impl OsalTimer {
         }
     }
 
-    pub fn restart(&mut self, timeout: Duration) {
-        *self = Self::new(timeout);
-    }
-
     pub fn is_expired(&self) -> bool {
         Instant::now() >= self.stop_time
     }

@@ -213,16 +213,18 @@ fn execute_primitive_read_command(
     )?;
 
     // Send data and wait for answer
-    let wkc = port.src_confirm(index, timeout)?;
+    let wkc = port.src_confirm(index, timeout);
 
-    data.copy_from_slice(
-        &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
-    );
+    if wkc.is_ok() {
+        data.copy_from_slice(
+            &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+        );
+    }
 
     // Clear buffer status
     port.set_buf_stat(index.into(), BufferState::Empty);
 
-    Ok(wkc)
+    wkc
 }
 
 fn execute_primitive_write_command(
@@ -247,12 +249,12 @@ fn execute_primitive_write_command(
     )?;
 
     // Send data and wait for answer
-    let wkc = port.src_confirm(index, timeout)?;
+    let wkc = port.src_confirm(index, timeout);
 
     // Clear buffer status
     port.set_buf_stat(index.into(), BufferState::Empty);
 
-    Ok(wkc)
+    wkc
 }
 
 /// Broadcast write primitive (blocking)
@@ -704,14 +706,26 @@ pub fn lrw(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_read_command(
-        port,
+    let index = port.get_index();
+    setup_datagram(
+        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
+        Command::ReadCommand(ReadCommand::LogicalReadWrite),
+        index,
         low_word(logical_address),
         high_word(logical_address),
         data,
-        timeout,
-        ReadCommand::LogicalReadWrite,
-    )
+    )?;
+    let wkc = port.src_confirm(index, timeout);
+    if wkc.is_ok()
+        && port.stack().rx_buffers()[usize::from(index)].data()[ETHERCAT_COMMAND_OFFET]
+            == u8::from(ReadCommand::LogicalReadWrite)
+    {
+        data.copy_from_slice(
+            &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+        );
+    }
+    port.set_buf_stat(usize::from(index), BufferState::Empty);
+    wkc
 }
 
 /// Logical memory read primitive (blocking)
@@ -733,14 +747,26 @@ pub fn lrd(
     data: &mut [u8],
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
-    execute_primitive_read_command(
-        port,
+    let index = port.get_index();
+    setup_datagram(
+        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
+        Command::ReadCommand(ReadCommand::LogicalRead),
+        index,
         low_word(logical_address),
         high_word(logical_address),
         data,
-        timeout,
-        ReadCommand::LogicalRead,
-    )
+    )?;
+    let wkc = port.src_confirm(index, timeout);
+    if wkc.is_ok()
+        && port.stack().rx_buffers()[usize::from(index)].data()[ETHERCAT_COMMAND_OFFET]
+            == u8::from(ReadCommand::LogicalRead)
+    {
+        data.copy_from_slice(
+            &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+        );
+    }
+    port.set_buf_stat(usize::from(index), BufferState::Empty);
+    wkc
 }
 
 /// Logical memory write primitive (blocking)
@@ -783,6 +809,9 @@ pub fn lwr(
 /// - `distributed_clock_time`: Distributed clock time read from reference slave
 /// - `timeout`: Timeout duration, standard is `TIMEOUT_RETURN`
 ///
+/// # Panics
+/// Will panic if the received data isn't large enough
+///
 /// # Errors
 /// Will return an error when it fails to send the data or didn't receive a reply.
 ///
@@ -793,7 +822,7 @@ pub fn lrwdc(
     logical_address: u32,
     data: &mut [u8],
     distributed_clock_reference_slave: u16,
-    distributed_clock_time: &mut [i64],
+    distributed_clock_time: &mut i64,
     timeout: Duration,
 ) -> Result<u16, NicdrvError> {
     let index = port.get_index();
@@ -811,7 +840,7 @@ pub fn lrwdc(
         )?;
 
         // FPRMW in second datagram
-        let distributed_clock_to_ethercat = Ethercat::from_host(distributed_clock_time[0]);
+        let distributed_clock_to_ethercat = Ethercat::from_host(*distributed_clock_time);
         add_datagram(
             tx_buffer,
             ReadCommand::FixedReadMultipleWrite.into(),
@@ -823,34 +852,23 @@ pub fn lrwdc(
         )
     };
 
-    let mut wkc = port.src_confirm(index, timeout)?;
+    let mut wkc = port.src_confirm(index, timeout);
     {
         let rx_buffer = &mut port.stack().rx_buffers()[usize::from(index)].data();
-        if rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into() {
-            let mut response_iter = rx_buffer[EthercatHeader::size()..].iter();
-            data.iter_mut()
-                .zip(response_iter.by_ref())
-                .for_each(|(dest, src)| *dest = *src);
-            wkc = u16::from_ne_bytes(response_iter.by_ref().take(2).enumerate().fold(
-                [0; 2],
-                |mut result, (index, value)| {
-                    result[index] = *value;
-                    result
-                },
-            ));
-            distributed_clock_time[0] = i64::from_ne_bytes(
-                rx_buffer[distributed_clock_offset..]
-                    .iter()
-                    .take(2)
-                    .enumerate()
-                    .fold([0; 8], |mut result, (index, value)| {
-                        result[index] = *value;
-                        result
-                    }),
+        if wkc.is_ok() && rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into()
+        {
+            let mut response = &rx_buffer[EthercatHeader::size()..];
+            data.copy_from_slice(response);
+            response = &response[data.len()..];
+            wkc = Ok(u16::from_ne_bytes(response[..2].try_into().unwrap()));
+            *distributed_clock_time = i64::from_ne_bytes(
+                rx_buffer[distributed_clock_offset..distributed_clock_offset + 2]
+                    .try_into()
+                    .unwrap(),
             );
         }
     }
     port.set_buf_stat(usize::from(index), BufferState::Empty);
 
-    Ok(wkc)
+    wkc
 }

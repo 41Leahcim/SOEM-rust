@@ -140,15 +140,15 @@ impl<R: Read> ReadFrom<R> for EthernetHeader {
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let destination_address = (0..3).try_fold([Network::default(); 3], |result, index| {
             let mut result = result;
-            result[index] = Network::<u16>::from_bytes(Self::read_bytes(reader)?);
+            result[index] = Network::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
             Ok::<_, io::Error>(result)
         })?;
         let source_address = (0..3).try_fold([Network::default(); 3], |result, index| {
             let mut result = result;
-            result[index] = Network::<u16>::from_bytes(Self::read_bytes(reader)?);
+            result[index] = Network::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
             Ok::<_, io::Error>(result)
         })?;
-        let etype = Network::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let etype = Network::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         Ok(Self {
             destination_address,
             source_address,
@@ -215,13 +215,13 @@ impl<R: Read> ReadFrom<R> for EthercatHeader {
     type Err = EthercatHeaderError;
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
-        let ethercat_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let command = Command::try_from(Self::read_byte(reader)?)?;
-        let index = Self::read_byte(reader)?;
-        let address_position = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let address_offset = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let data_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let interrupt = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let ethercat_length = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let command = Command::try_from(u8::read_from(reader)?)?;
+        let index = u8::read_from(reader)?;
+        let address_position = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let address_offset = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let data_length = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let interrupt = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         Ok(Self {
             ethercat_length,
             command,

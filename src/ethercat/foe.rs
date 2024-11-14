@@ -114,12 +114,12 @@ impl<R: Read> ReadFrom<R> for FileOverEthercat {
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
-        let opcode = Self::read_byte(reader)?.try_into()?;
-        let reserved = Self::read_byte(reader)?;
+        let opcode = u8::read_from(reader)?.try_into()?;
+        let reserved = u8::read_from(reader)?;
         let packet_info =
-            PacketInfo::PacketNumber(Ethercat::<u32>::from_bytes(Self::read_bytes(reader)?));
+            PacketInfo::PacketNumber(Ethercat::<u32>::from_bytes(<[u8; 4]>::read_from(reader)?));
         let packet_data = PacketData::Data(
-            heapless::Vec::from_slice(&Self::read_bytes::<MAX_FOE_DATA>(reader)?).unwrap(),
+            heapless::Vec::from_slice(&<[u8; MAX_FOE_DATA]>::read_from(reader)?).unwrap(),
         );
         Ok(Self {
             mailbox_header,

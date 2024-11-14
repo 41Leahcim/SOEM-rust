@@ -182,13 +182,13 @@ impl<R: Read> ReadFrom<R> for Mapping {
     type Err = io::Error;
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
-        let current_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let max_length = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+        let current_length = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let max_length = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         let idn = (0..MAX_MAPPING_LENGTH).try_fold(
             [Ethercat::default(); MAX_MAPPING_LENGTH],
             |result, index| {
                 let mut result = result;
-                result[index] = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
+                result[index] = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
                 Ok::<_, io::Error>(result)
             },
         )?;
@@ -296,8 +296,8 @@ impl<R: Read> ReadFrom<R> for Attribute {
     type Err = ServoOverEthercatError;
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
-        let eval_factor = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?);
-        let flags = Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?).to_host();
+        let eval_factor = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
+        let flags = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?).to_host();
         let length = (flags & 3) as u8;
         let idn_type = IdnType::from(flags as u8 >> 2);
         let datatype = SoeType::try_from(((flags >> 4) & 7) as u8)?;
@@ -378,13 +378,14 @@ impl<R: Read> ReadFrom<R> for ServoOverEthercat {
 
     fn read_from(reader: &mut R) -> Result<Self, Self::Err> {
         let mailbox_header = MailboxHeader::read_from(reader)?;
-        let flags = Self::read_byte(reader)?;
+        let flags = u8::read_from(reader)?;
         let opcode = ServoOverEthercatOpcode::try_from(flags & 7)?;
         let incomplete = (flags >> 3) & 1 != 0;
         let error = (flags >> 4) & 1 != 0;
         let drive_number = flags >> 5;
-        let element_flags = Self::read_byte(reader)?;
-        let value = SoEValue::FragmentsLeft(Ethercat::<u16>::from_bytes(Self::read_bytes(reader)?));
+        let element_flags = u8::read_from(reader)?;
+        let value =
+            SoEValue::FragmentsLeft(Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?));
         Ok(Self {
             mailbox_header,
             opcode,
