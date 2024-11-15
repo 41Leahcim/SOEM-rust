@@ -111,7 +111,7 @@ impl Default for ServiceData {
 
 impl ServiceData {
     pub const fn size() -> usize {
-        size_of::<[u8; 200]>()
+        size_of::<[u8; 512]>()
     }
 
     pub fn as_bytes(&self) -> &[u8; 512] {
@@ -1917,4 +1917,17 @@ pub fn read_pdo_map_complete_access(
         sync_manager_communication_type;
 
     Ok(*input_size == 0 && *output_size == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ethercat::coe::ServiceDataObjectService;
+
+    #[test]
+    fn service_data_object_service_bytes() {
+        assert_eq!(
+            ServiceDataObjectService::default().bytes(),
+            [0; ServiceDataObjectService::size()]
+        );
+    }
 }

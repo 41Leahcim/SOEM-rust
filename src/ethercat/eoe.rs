@@ -922,3 +922,18 @@ pub fn read_fragment(
 
     Ok(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::{bytes_to_ip, ip_to_bytes};
+
+    #[test]
+    fn ip_to_bytes_to_ip() {
+        let mut bytes = [0; 4];
+        let ip = Ipv4Addr::new(127, 0, 0, 1);
+        ip_to_bytes(ip, &mut bytes);
+        assert_eq!(ip, bytes_to_ip(&bytes));
+    }
+}

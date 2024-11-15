@@ -37,7 +37,7 @@ impl<Int: PrimInt> Network<Int> {
     }
 }
 
-macro_rules! ethercat_bytes {
+macro_rules! network_bytes {
     ($data_type: ident) => {
         impl Network<$data_type> {
             pub const fn to_bytes(self) -> [u8; size_of::<$data_type>()] {
@@ -51,8 +51,18 @@ macro_rules! ethercat_bytes {
     };
 }
 
-ethercat_bytes!(u16);
-ethercat_bytes!(u32);
-ethercat_bytes!(i32);
-ethercat_bytes!(i64);
-ethercat_bytes!(u64);
+network_bytes!(u16);
+network_bytes!(u32);
+network_bytes!(i32);
+network_bytes!(i64);
+network_bytes!(u64);
+
+#[cfg(test)]
+mod tests {
+    use crate::oshw::Network;
+
+    #[test]
+    fn from_host_to_host() {
+        assert_eq!(Network::<u16>::from_host(0x1234).to_host(), 0x1234);
+    }
+}

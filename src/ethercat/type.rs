@@ -907,7 +907,10 @@ impl From<CanopenOverEthercatSdoCommand> for u8 {
 /// CANopen over EtherCAT object description command
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum COEObjectDescriptionCommand {
-    #[default]
+    #[cfg(test)]
+    #[cfg_attr(test, default)]
+    Invalid,
+    #[cfg_attr(not(test), default)]
     ObjectDesciptionListRequest = 1,
     ObjectDesciptionListResponse,
     ObjectDesciptionRequest,
@@ -1280,3 +1283,50 @@ ethercat_bytes!(u32);
 ethercat_bytes!(i32);
 ethercat_bytes!(i64);
 ethercat_bytes!(u64);
+
+#[cfg(test)]
+mod tests {
+    use std::array;
+
+    use crate::{
+        ethercat::r#type::{
+            Command, Ethercat, EthercatHeader, EthernetHeader, ReadCommand, ETH_P_ECAT,
+        },
+        oshw::Network,
+    };
+
+    #[test]
+    fn ethernet_header_bytes() {
+        assert_eq!(
+            EthernetHeader::new([0; 3]).bytes(),
+            array::from_fn(|i| match i {
+                ..6 => 0xFF,
+                6..12 => 0,
+                12..16 => Network::from_host(ETH_P_ECAT).to_bytes()[i - 12],
+                _ => panic!("Ethernet header too large"),
+            })
+        );
+    }
+
+    #[test]
+    fn ethercat_header_bytes() {
+        assert_eq!(
+            EthercatHeader::new(
+                Ethercat::default(),
+                Command::ReadCommand(ReadCommand::Nop),
+                0,
+                Ethercat::default(),
+                Ethercat::default(),
+                Ethercat::default(),
+                Ethercat::default()
+            )
+            .bytes(),
+            [0; EthercatHeader::size()]
+        );
+    }
+
+    #[test]
+    fn ethercat_conversion() {
+        assert_eq!(Ethercat::<u16>::from_host(0x1234).to_host(), 0x1234);
+    }
+}

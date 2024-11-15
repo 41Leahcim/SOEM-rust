@@ -4762,3 +4762,26 @@ fn fixed_pointer_read_multi(
     port.set_buf_stat(usize::from(index), BufferState::Empty);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ethercat::main::{ApplicationLayerStatus, Fmmu, SyncManager};
+
+    #[test]
+    fn fmmu_bytes() {
+        assert_eq!(Fmmu::default().bytes(), [0; Fmmu::size()]);
+    }
+
+    #[test]
+    fn sync_manager_bytes() {
+        assert_eq!(SyncManager::default().bytes(), [0; SyncManager::size()]);
+    }
+
+    #[test]
+    fn application_layer_status_bytes() {
+        assert_eq!(
+            ApplicationLayerStatus::default().bytes(),
+            [0; ApplicationLayerStatus::size()]
+        );
+    }
+}
