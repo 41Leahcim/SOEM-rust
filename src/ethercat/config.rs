@@ -117,41 +117,41 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
     // setting for old netX100 slaves.
 
     // Ignore alias register
-    let mut byte = [0];
-    bwr(
+    let _ = bwr(
         context.port_mut(),
         0,
         EthercatRegister::DeviceLayerAlias,
-        &byte,
+        &[0],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset all slaves to initialization
-    byte[0] = EthercatState::Init as u8 | EthercatState::Error as u8;
-    bwr(
+    let byte = EthercatState::Init as u8 | EthercatState::Error as u8;
+    let _ = bwr(
         context.port_mut(),
         0,
         EthercatRegister::ApplicationLayerControl,
-        &byte,
+        &[byte],
         TIMEOUT_RETURN3,
-    )?;
+    );
     // NetX100 should now be functional
 
     // Reset all slaves to initialization
-    bwr(
+    let _ = bwr(
         context.port_mut(),
         0,
         EthercatRegister::ApplicationLayerControl,
-        &byte,
+        &[byte],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
+    let mut word = [0; 2];
     // Detect the number of slaves
     let work_counter = brd(
         context.port_mut(),
         0,
         EthercatRegister::Type,
-        &mut byte,
+        &mut word,
         TIMEOUT_SAFE,
     )?;
 
@@ -168,131 +168,125 @@ fn detect_slaves(context: &mut Context) -> Result<u16, ConfigError> {
     }
 }
 
-fn set_slaves_to_default(context: &mut Context) -> Result<(), NicdrvError> {
+fn set_slaves_to_default(context: &mut Context) {
     let port = context.port_mut();
 
     // Deactivate loop manual
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::DeviceLayerPort,
         &[0],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Set interrupt mask
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::InterruptMask,
-        &[0],
+        &Ethercat::<u16>::from_host(4).to_bytes(),
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset CRC counter
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::ReceiveError,
         &[0; 8],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset Fieldbus memory management units
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::FieldbusMemoryManagementUnit0,
         &[0; 16 * 3],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset synchronization manager
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::SyncManager0,
         &[0; 8 * 4],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset activation register
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::DistributedClockSynchronizationActive,
         &[0],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset system time + offset
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::DistributedClockSystemTime,
         &[0; 4],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Digital Clock speedstart
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::DistributedClockSpeedCount,
-        &Ethercat::from_host(0x1000u16).to_bytes(),
+        &Ethercat::<u16>::from_host(0x1000).to_bytes(),
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Digital clock filter expression
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::DistributedClockTimeFilter,
-        &Ethercat::from_host(0xC00u16).to_bytes(),
+        &Ethercat::<u16>::from_host(0xC00).to_bytes(),
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Ignore alias register
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::DeviceLayerAlias,
         &[0],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Reset all slaves to initialization
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::ApplicationLayerControl,
         &[EthercatState::Init as u8 | EthercatState::Error as u8],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Force eeprom from PDI
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::EepromConfig,
         &[2],
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Set EEPROM to master
-    bwr(
+    let _ = bwr(
         port,
         0,
         EthercatRegister::EepromConfig,
         &[0],
         TIMEOUT_RETURN3,
-    )?;
-
-    Ok(())
-}
-
-fn config_from_table(_context: &mut Context, _slave: u16) -> u8 {
-    0
+    );
 }
 
 /// If slave has SII and same slave ID was done before, use previous data.
@@ -327,7 +321,7 @@ pub fn lookup_previous_sii(context: &mut Context, slave: u16) -> bool {
     };
 
     let slave = usize::from(slave);
-    let slaves = &mut context.slavelist_mut();
+    let slaves = context.slavelist_mut();
     *slaves[slave]
         .protocol_details_mut()
         .canopen_over_ethercat_mut() = slaves[found_slave]
@@ -356,7 +350,7 @@ pub fn lookup_previous_sii(context: &mut Context, slave: u16) -> bool {
 
     for sync_manager_index in 0..MAX_SM {
         *slaves[slave].get_sync_manager_mut(sync_manager_index) =
-            slaves[found_slave].get_sync_manager(sync_manager_index);
+            *slaves[found_slave].get_sync_manager(sync_manager_index);
     }
     *slaves[slave].fmmu0_function_mut() = slaves[found_slave].fmmu0_function();
     *slaves[slave].fmmu1_function_mut() = slaves[found_slave].fmmu1_function();
@@ -371,57 +365,49 @@ fn async_eeprom_read(
     next_value: SiiGeneralItem,
     eeprom_requests: VecDeque<EepromRequest>,
     storing_function: impl Fn(&mut Slave, Ethercat<u32>),
-) -> Result<VecDeque<EepromRequest>, MainError> {
+) -> VecDeque<EepromRequest> {
     eeprom_requests
         .into_iter()
-        .zip(0..context.slave_count())
-        .map(|(request, slave)| {
-            let eedata = request.read_eeprom_data(context, TIMEOUT_EEPROM)?;
-            storing_function(context.get_slave_mut(slave), eedata);
-            EepromRequest::request_eeprom_data(context, slave, next_value)
+        .filter_map(|request| {
+            let slave = request.slave();
+            if let Ok(eedata) = request.read_eeprom_data(context, TIMEOUT_EEPROM) {
+                storing_function(context.get_slave_mut(slave), eedata);
+            }
+            EepromRequest::request_eeprom_data(context, slave, next_value).ok()
         })
         .collect()
 }
 
 fn read_mailbox_info(
     context: &mut Context,
-    slave: u16,
-    eeprom_requests: &mut VecDeque<EepromRequest>,
-) -> Result<(), MainError> {
+    eeprom_request: EepromRequest,
+) -> Option<EepromRequest> {
     // Read mailbox information
-    let mailbox_info = eeprom_requests
-        .pop_front()
-        .unwrap()
-        .read_eeprom_data(context, TIMEOUT_EEPROM)?;
-    *context.get_slave_mut(slave).mailbox_mut().read_offset_mut() =
-        low_word(mailbox_info.to_host());
-    *context.get_slave_mut(slave).mailbox_mut().read_length_mut() =
-        high_word(mailbox_info.to_host());
+    let slave = eeprom_request.slave();
+    if let Ok(mailbox_info) = eeprom_request.read_eeprom_data(context, TIMEOUT_EEPROM) {
+        *context.get_slave_mut(slave).mailbox_mut().read_offset_mut() =
+            low_word(mailbox_info.to_host());
+        *context.get_slave_mut(slave).mailbox_mut().read_length_mut() =
+            high_word(mailbox_info.to_host());
+    }
     if context.get_slave_mut(slave).mailbox().read_length() == 0 {
         *context.get_slave_mut(slave).mailbox_mut().read_length_mut() =
             context.get_slave(slave).mailbox().length();
     }
-    eeprom_requests.push_back(EepromRequest::request_eeprom_data(
-        context,
-        slave,
-        SiiGeneralItem::MailboxProtocol,
-    )?);
-    Ok(())
+    EepromRequest::request_eeprom_data(context, slave, SiiGeneralItem::MailboxProtocol).ok()
 }
 
-fn read_topology(
-    context: &mut Context,
-    config_address: u16,
-    slave: u16,
-) -> Result<(), NicdrvError> {
+fn read_topology(context: &mut Context, config_address: u16, slave: u16) {
     // Extract topology from DL status
-    let topology = fprdw(
+    let Ok(topology) = fprdw(
         context.port_mut(),
         config_address,
         EthercatRegister::DeviceLayerStatus,
         TIMEOUT_RETURN3,
-    )?
-    .to_host();
+    )
+    .map(Ethercat::to_host) else {
+        return;
+    };
     let mut topology_count = 0;
     let mut active_ports = 0;
 
@@ -450,7 +436,6 @@ fn read_topology(
     }
     *context.get_slave_mut(slave).topology_mut() = topology_count;
     *context.get_slave_mut(slave).active_ports_mut() = active_ports;
-    Ok(())
 }
 
 fn search_parent(context: &mut Context, slave: u16) {
@@ -461,44 +446,41 @@ fn search_parent(context: &mut Context, slave: u16) {
     // 4 = 4 links, cross point
     // search for parent
     *context.get_slave_mut(slave).parent_port_mut() = 0;
-    if slave > 1 {
-        let mut topology_links = 0;
-        let slave_count = slave - 1;
-        loop {
-            let topology = context.get_slave(slave_count).topology();
-            match topology {
-                // Endpoint found
-                1 => topology_links -= 1,
+    if slave <= 1 {
+        return;
+    }
+    let mut topology_links = 0;
+    let slave_count = slave - 1;
+    loop {
+        let topology = context.get_slave(slave_count).topology();
+        match topology {
+            // Endpoint found
+            1 => topology_links -= 1,
 
-                // Split found
-                3 => topology_links += 1,
+            // Split found
+            3 => topology_links += 1,
 
-                // Cross found
-                4 => topology_links += 2,
+            // Cross found
+            4 => topology_links += 2,
 
-                // Ignore everything else
-                _ => {}
-            }
+            // Ignore everything else
+            _ => {}
+        }
 
-            // Parent found
-            if topology_links >= 0 && topology > 1 || slave_count == 1 {
-                *context.get_slave_mut(slave).parent_mut() = slave_count as u8;
-                break;
-            }
-            topology_links -= 1;
+        // Parent found
+        if topology_links >= 0 && topology > 1 || slave_count == 1 {
+            *context.get_slave_mut(slave).parent_mut() = slave_count as u8;
+            break;
+        }
+        topology_links -= 1;
 
-            if slave_count == 0 {
-                break;
-            }
+        if slave_count == 0 {
+            break;
         }
     }
 }
 
-fn configure_mailbox(
-    context: &mut Context,
-    slave: u16,
-    eeprom_requests: &mut VecDeque<EepromRequest>,
-) -> Result<(), MainError> {
+fn configure_mailbox(context: &mut Context, slave: u16) {
     let sync_manager_type = context.get_slave_mut(slave).sync_manager_type_mut();
     sync_manager_type[0] = SyncManagerType::MailboxWrite;
     sync_manager_type[1] = SyncManagerType::MailboxRead;
@@ -507,7 +489,7 @@ fn configure_mailbox(
     let slave_object = context.get_slave_mut(slave);
     *slave_object.get_sync_manager_mut(0).start_address_mut() =
         Ethercat::from_host(slave_object.mailbox().write_offset());
-    *slave_object.get_sync_manager(0).sm_length_mut() =
+    *slave_object.get_sync_manager_mut(0).sm_length_mut() =
         Ethercat::from_host(slave_object.mailbox().length());
     *slave_object.get_sync_manager_mut(0).sm_flags_mut() = Ethercat::from_host(DEFAULT_MAILBOX_SM0);
     *slave_object.get_sync_manager_mut(1).start_address_mut() =
@@ -515,15 +497,9 @@ fn configure_mailbox(
     *slave_object.get_sync_manager_mut(1).sm_length_mut() =
         Ethercat::from_host(slave_object.mailbox().read_length());
     *slave_object.get_sync_manager_mut(1).sm_flags_mut() = Ethercat::from_host(DEFAULT_MAILBOX_SM1);
-    *context.get_slave_mut(slave).mailbox_mut().protocols_mut() = eeprom_requests
-        .pop_front()
-        .unwrap()
-        .read_eeprom_data(context, TIMEOUT_EEPROM)?
-        .to_host() as u16;
-    Ok(())
 }
 
-fn configure_slave_with_sii(context: &mut Context, slave: u16) -> Result<(), MainError> {
+fn configure_slave_with_sii(context: &mut Context, slave: u16) {
     let sii_general = context
         .sii_find(slave, SiiCategory::General)
         .unwrap_or_default();
@@ -531,32 +507,54 @@ fn configure_slave_with_sii(context: &mut Context, slave: u16) -> Result<(), Mai
         *context
             .get_slave_mut(slave)
             .protocol_details_mut()
-            .canopen_over_ethercat_mut() = context.sii_get_byte(slave, sii_general + 7).unwrap();
+            .canopen_over_ethercat_mut() = context
+            .sii_get_byte(slave, sii_general + 7)
+            .unwrap_or_default();
         *context
             .get_slave_mut(slave)
             .protocol_details_mut()
-            .file_over_ethercat_mut() = context.sii_get_byte(slave, sii_general + 8).unwrap();
+            .file_over_ethercat_mut() = context
+            .sii_get_byte(slave, sii_general + 8)
+            .unwrap_or_default();
         *context
             .get_slave_mut(slave)
             .protocol_details_mut()
-            .ethernet_over_ethercat_mut() = context.sii_get_byte(slave, sii_general + 9).unwrap();
+            .ethernet_over_ethercat_mut() = context
+            .sii_get_byte(slave, sii_general + 9)
+            .unwrap_or_default();
         *context
             .get_slave_mut(slave)
             .protocol_details_mut()
-            .servo_over_ethercat_mut() = context.sii_get_byte(slave, sii_general + 0xA).unwrap();
-        if context.sii_get_byte(slave, sii_general + 0xD).unwrap() & 0x2 > 0 {
+            .servo_over_ethercat_mut() = context
+            .sii_get_byte(slave, sii_general + 0xA)
+            .unwrap_or_default();
+        if context
+            .sii_get_byte(slave, sii_general + 0xD)
+            .is_ok_and(|block_lrw| block_lrw & 0x2 > 0)
+        {
             *context.get_slave_mut(slave).block_logical_read_write_mut() = 1;
             *context.get_slave_mut(0).block_logical_read_write_mut() += 1;
+        } else {
+            *context.get_slave_mut(slave).block_logical_read_write_mut() = 0;
         }
-        *context.get_slave_mut(slave).ebus_current_mut() =
-            u16::from(context.sii_get_byte(slave, sii_general + 0xE).unwrap())
-                + (u16::from(context.sii_get_byte(slave, sii_general + 0xF).unwrap()) << 8);
+        *context.get_slave_mut(slave).ebus_current_mut() = u16::from(
+            context
+                .sii_get_byte(slave, sii_general + 0xE)
+                .unwrap_or_default(),
+        ) + (u16::from(
+            context
+                .sii_get_byte(slave, sii_general + 0xF)
+                .unwrap_or_default(),
+        ) << 8);
         *context.get_slave_mut(0).ebus_current_mut() += context.get_slave(slave).ebus_current();
     }
 
     // SII strings section
-    if context.sii_find(slave, SiiCategory::String).is_ok() {
-        *context.get_slave_mut(slave).name_mut() = context.sii_string(slave, 1)?;
+    if let Ok(Ok(name)) = context
+        .sii_find(slave, SiiCategory::String)
+        .map(|_| context.sii_string(slave, 1))
+    {
+        *context.get_slave_mut(slave).name_mut() = name;
     } else {
         // No name for slave found, use constructed name
         let manufacturer = context.get_slave_mut(slave).eeprom().manufacturer();
@@ -570,10 +568,9 @@ fn configure_slave_with_sii(context: &mut Context, slave: u16) -> Result<(), Mai
     }
 
     // SII SM section
-    *context.eep_sync_manager_mut() = EepromSyncManager::sii_sm(context, slave)?;
-    let number_sm = context.eep_sync_manager().sync_manager_count();
+    *context.eep_sync_manager_mut() = EepromSyncManager::sii_sm(context, slave).unwrap_or_default();
 
-    if number_sm > 0 {
+    if context.eep_sync_manager().sync_manager_count() > 0 {
         *context
             .get_slave_mut(slave)
             .get_sync_manager_mut(0)
@@ -599,8 +596,8 @@ fn configure_slave_with_sii(context: &mut Context, slave: u16) -> Result<(), Mai
                 .get_sync_manager_mut(sync_manager_count)
                 .start_address_mut() = Ethercat::from_host(eep_sync_manager.phase_start());
             *context
-                .get_slave(slave)
-                .get_sync_manager(sync_manager_count)
+                .get_slave_mut(slave)
+                .get_sync_manager_mut(sync_manager_count)
                 .sm_length_mut() = Ethercat::from_host(eep_sync_manager.phase_length());
             *context
                 .get_slave_mut(slave)
@@ -615,60 +612,58 @@ fn configure_slave_with_sii(context: &mut Context, slave: u16) -> Result<(), Mai
         *context.eep_sync_manager_mut() = last_eep_sync_manager;
     }
 
-    *context.eep_fmmu_mut() = EepromFmmu::sii_fmmu(context, slave)?;
-    if context.eep_fmmu().fmmu_count() != 0 {
-        if context.eep_fmmu().fmmu()[0] != 0xFF {
-            *context.get_slave_mut(slave).fmmu0_function_mut() = context.eep_fmmu().fmmu()[0];
-        }
-        if context.eep_fmmu().fmmu()[1] != 0xFF {
-            *context.get_slave_mut(slave).fmmu1_function_mut() = context.eep_fmmu().fmmu()[1];
-        }
-        if context.eep_fmmu().fmmu()[2] != 0xFF {
-            *context.get_slave_mut(slave).fmmu2_function_mut() = context.eep_fmmu().fmmu()[2];
-        }
-        if context.eep_fmmu().fmmu()[3] != 0xFF {
-            *context.get_slave_mut(slave).fmmu3_function_mut() = context.eep_fmmu().fmmu()[3];
-        }
+    *context.eep_fmmu_mut() = EepromFmmu::sii_fmmu(context, slave).unwrap_or_default();
+    if context.eep_fmmu().fmmu_count() == 0 {
+        return;
     }
-    Ok(())
+    if context.eep_fmmu().fmmu()[0] != 0xFF {
+        *context.get_slave_mut(slave).fmmu0_function_mut() = context.eep_fmmu().fmmu()[0];
+    }
+    if context.eep_fmmu().fmmu()[1] != 0xFF {
+        *context.get_slave_mut(slave).fmmu1_function_mut() = context.eep_fmmu().fmmu()[1];
+    }
+    if context.eep_fmmu().fmmu()[2] != 0xFF {
+        *context.get_slave_mut(slave).fmmu2_function_mut() = context.eep_fmmu().fmmu()[2];
+    }
+    if context.eep_fmmu().fmmu()[3] != 0xFF {
+        *context.get_slave_mut(slave).fmmu3_function_mut() = context.eep_fmmu().fmmu()[3];
+    }
 }
 
-fn configure_sync_manager(
-    context: &mut Context,
-    slave: u16,
-    config_address: u16,
-) -> Result<(), MainError> {
+fn configure_sync_manager(context: &mut Context, slave: u16, config_address: u16) {
     let slave_object = context.get_slave_mut(slave);
 
     // Should never happen
     if slave_object.get_sync_manager(0).start_address().is_zero() {
         ec_println!("Slave {slave} has no proper mailbox in configuration, try default.");
-        *slave_object.get_sync_manager(0).start_address_mut() = Ethercat::from_host(0x1000);
-        *slave_object.get_sync_manager(0).sm_length_mut() = Ethercat::from_host(0x80);
-        *slave_object.get_sync_manager(0).sm_flags_mut() = Ethercat::from_host(DEFAULT_MAILBOX_SM0);
+        *slave_object.get_sync_manager_mut(0).start_address_mut() = Ethercat::from_host(0x1000);
+        *slave_object.get_sync_manager_mut(0).sm_length_mut() = Ethercat::from_host(0x80);
+        *slave_object.get_sync_manager_mut(0).sm_flags_mut() =
+            Ethercat::from_host(DEFAULT_MAILBOX_SM0);
         *slave_object.get_sync_manager_type_mut(0) = SyncManagerType::MailboxWrite;
     }
 
     // Should never happen
     if slave_object.get_sync_manager(1).start_address().is_zero() {
         ec_println!("Slave {slave} has no proper mailbox out configuration, try default.");
-        *slave_object.get_sync_manager(1).start_address_mut() = Ethercat::from_host(0x1080);
-        *slave_object.get_sync_manager(1).sm_length_mut() = Ethercat::from_host(0x80);
-        *slave_object.get_sync_manager(1).sm_flags_mut() = Ethercat::from_host(DEFAULT_MAILBOX_SM1);
+        *slave_object.get_sync_manager_mut(1).start_address_mut() = Ethercat::from_host(0x1080);
+        *slave_object.get_sync_manager_mut(1).sm_length_mut() = Ethercat::from_host(0x80);
+        *slave_object.get_sync_manager_mut(1).sm_flags_mut() =
+            Ethercat::from_host(DEFAULT_MAILBOX_SM1);
         *slave_object.get_sync_manager_type_mut(1) = SyncManagerType::MailboxRead;
     }
 
     // Program SM0 mailbox in and SM1 mailbox out for slave.
     // Writing both sm in one datagram will solve timing issue in old NETX
-    let sync_manager = context.get_slave(slave).get_sync_manager(0);
-    fpwr(
+
+    let sync_manager = context.get_slave(slave).get_sync_manager(0).bytes();
+    let _ = fpwr(
         context.port_mut(),
         config_address,
-        EthercatRegister::SyncManager0 as u16,
-        &sync_manager.bytes()?,
+        EthercatRegister::SyncManager0.into(),
+        &sync_manager,
         TIMEOUT_RETURN3,
-    )?;
-    Ok(())
+    );
 }
 
 /// Enumerate and initialize all slaves
@@ -688,76 +683,74 @@ fn configure_sync_manager(
 ///
 /// # Returns
 /// Number of slaves found or error
-#[expect(clippy::missing_panics_doc)]
 pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, ConfigError> {
     ec_println!("ec_config_init {use_table}");
     init_context(context)?;
     let slave_count = detect_slaves(context)?;
 
-    set_slaves_to_default(context)?;
-    let mut eeprom_requests = (0..context.slave_count())
-        .map(|slave| {
+    set_slaves_to_default(context);
+    let mut eeprom_requests = (1..=context.slave_count())
+        .filter_map(|slave| {
             let address_position = 1u16.wrapping_sub(slave);
 
-            {
-                // Read interface type of slave
-                let val16 = aprdw(
-                    context.port_mut(),
-                    address_position,
-                    EthercatRegister::ProcessDataInterfaceControl,
-                    TIMEOUT_RETURN3,
-                )?;
-                *context.get_slave_mut(slave).interface_type_mut() = val16.to_host();
+            // Read interface type of slave
+            if let Ok(interface_type) = aprdw(
+                context.port_mut(),
+                address_position,
+                EthercatRegister::ProcessDataInterfaceControl,
+                TIMEOUT_RETURN3,
+            ) {
+                *context.get_slave_mut(slave).interface_type_mut() = interface_type.to_host();
+            }
 
-                // A node offset is used to improve readability of network frames.
-                // This has no impact on the number of addressable slaves (auto wrap around)
+            // A node offset is used to improve readability of network frames.
+            // This has no impact on the number of addressable slaves (auto wrap around)
 
-                // Set node address of slave
-                apwrw(
-                    context.port_mut(),
-                    address_position,
-                    EthercatRegister::StaDr,
-                    Ethercat::from_host(slave + NODE_OFFSET),
-                    TIMEOUT_RETURN3,
-                )?;
+            // Set node address of slave
+            let _ = apwrw(
+                context.port_mut(),
+                address_position,
+                EthercatRegister::StaDr,
+                Ethercat::from_host(slave + NODE_OFFSET),
+                TIMEOUT_RETURN3,
+            );
 
-                // Kill non ecat frames for first slave, pass all frames for following slaves
-                let pass_ecat_frames_only = slave == 1;
+            // Kill non ecat frames for first slave, pass all frames for following slaves
+            // Set non ecat frame behaviour
+            let _ = apwrw(
+                context.port_mut(),
+                address_position,
+                EthercatRegister::DeviceLayerControl,
+                Ethercat::from_host(u16::from(slave == 1)),
+                TIMEOUT_RETURN3,
+            );
+            let config_address = aprdw(
+                context.port_mut(),
+                address_position,
+                EthercatRegister::StaDr,
+                TIMEOUT_RETURN3,
+            )
+            .ok()?
+            .to_host();
+            *context.get_slave_mut(slave).config_address_mut() = config_address;
 
-                // Set non ecat frame behaviour
-                apwrw(
-                    context.port_mut(),
-                    address_position,
-                    EthercatRegister::DeviceLayerControl,
-                    Ethercat::from_host(u16::from(pass_ecat_frames_only)),
-                    TIMEOUT_RETURN3,
-                )?;
-                let config_address = aprdw(
-                    context.port_mut(),
-                    address_position,
-                    EthercatRegister::StaDr,
-                    TIMEOUT_RETURN3,
-                )?
-                .to_host();
-                *context.get_slave_mut(slave).config_address_mut() = config_address;
+            if let Ok(alias_address) = fprdw(
+                context.port_mut(),
+                config_address,
+                EthercatRegister::Alias,
+                TIMEOUT_RETURN3,
+            ) {
+                *context.get_slave_mut(slave).alias_address_mut() = alias_address.to_host();
+            }
 
-                *context.get_slave_mut(slave).alias_address_mut() = fprdw(
-                    context.port_mut(),
-                    config_address,
-                    EthercatRegister::Alias,
-                    TIMEOUT_RETURN3,
-                )?
-                .to_host();
-
-                let eeprom_state = fprdw(
-                    context.port_mut(),
-                    config_address,
-                    EthercatRegister::EepromControlStat,
-                    TIMEOUT_RETURN3,
-                )?
-                .to_host();
+            if let Ok(eeprom_state) = fprdw(
+                context.port_mut(),
+                config_address,
+                EthercatRegister::EepromControlStat,
+                TIMEOUT_RETURN3,
+            ) {
                 *context.get_slave_mut(slave).eeprom_mut().read_size_mut() =
-                    if eeprom_state & EEPROM_STATE_MACHINE_READ64 != 0 {
+                    if eeprom_state.to_host() & EEPROM_STATE_MACHINE_READ64 != 0 {
                         EepReadSize::Bytes8
                     } else {
                         EepReadSize::Bytes4
@@ -765,9 +758,9 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
             }
 
             // Read the manufacturer of the slave from it's EEPROM
-            EepromRequest::request_eeprom_data(context, slave, SiiGeneralItem::Manufacturer)
+            EepromRequest::request_eeprom_data(context, slave, SiiGeneralItem::Manufacturer).ok()
         })
-        .collect::<Result<VecDeque<EepromRequest>, MainError>>()?;
+        .collect::<VecDeque<EepromRequest>>();
 
     // Store manufacturer and request id
     eeprom_requests = async_eeprom_read(
@@ -777,7 +770,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         |slave, manufacturer| {
             *slave.eeprom_mut().manufacturer_mut() = manufacturer.to_host();
         },
-    )?;
+    );
 
     // Store ID and request revision
     eeprom_requests = async_eeprom_read(
@@ -787,7 +780,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         |slave, id| {
             *slave.eeprom_mut().id_mut() = id.to_host();
         },
-    )?;
+    );
 
     // Store revision and request mailbox address + mailbox size
     eeprom_requests = async_eeprom_read(
@@ -797,91 +790,101 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
         |slave, revision| {
             *slave.eeprom_mut().revision_mut() = revision.to_host();
         },
-    )?;
+    );
 
-    for slave in 1..context.slave_count() {
-        // Mailbox address and mailbox size
-        let mailbox_rx = eeprom_requests
-            .pop_front()
-            .unwrap()
-            .read_eeprom_data(context, TIMEOUT_EEPROM)?;
-        *context.get_slave_mut(slave).mailbox_mut().read_offset_mut() =
-            low_word(mailbox_rx.to_host());
-        *context.get_slave_mut(slave).mailbox_mut().length_mut() = high_word(mailbox_rx.to_host());
+    eeprom_requests = eeprom_requests
+        .into_iter()
+        .filter_map(|eeprom_request| {
+            let slave = eeprom_request.slave();
+            // Mailbox address and mailbox size
+            let mailbox_rx = eeprom_request
+                .read_eeprom_data(context, TIMEOUT_EEPROM)
+                .ok()?;
+            *context
+                .get_slave_mut(slave)
+                .mailbox_mut()
+                .write_offset_mut() = low_word(mailbox_rx.to_host());
+            *context.get_slave_mut(slave).mailbox_mut().length_mut() =
+                high_word(mailbox_rx.to_host());
 
-        if context.get_slave(slave).mailbox().length() > 0 {
+            if context.get_slave(slave).mailbox().length() == 0 {
+                return None;
+            }
             // Read mailbox offset
-            eeprom_requests.push_back(EepromRequest::request_eeprom_data(
-                context,
-                slave,
-                SiiGeneralItem::TxMailboxAddress,
-            )?);
-        }
-    }
+            EepromRequest::request_eeprom_data(context, slave, SiiGeneralItem::TxMailboxAddress)
+                .ok()
+        })
+        .collect::<VecDeque<EepromRequest>>();
+
+    eeprom_requests = eeprom_requests
+        .into_iter()
+        .filter_map(|eeprom_request| read_mailbox_info(context, eeprom_request))
+        .collect();
 
     for slave in 1..context.slave_count() {
-        if context.get_slave(slave).mailbox().length() > 0 {
-            read_mailbox_info(context, slave, &mut eeprom_requests)?;
-        }
         let config_address = context.get_slave(slave).config_address();
-        let escsup = fprdw(
+
+        // Check whether the slave supports distributed clock
+        if fprdw(
             context.port_mut(),
             config_address,
             EthercatRegister::EscSup,
             TIMEOUT_RETURN3,
-        )?;
-
-        // Check whether the slave supports distributed clock
-        if context.get_slave(slave).distributed_clock().is_none() && escsup.to_host() & 4 > 0 {
+        )
+        .is_ok_and(|escsup| escsup.to_host() & 4 > 0)
+        {
             context
                 .get_slave_mut(slave)
                 .set_distributed_clock(DistributedClock::default());
+        } else {
+            context.get_slave_mut(slave).remove_distributed_clock();
         }
 
-        read_topology(context, config_address, slave)?;
+        read_topology(context, config_address, slave);
 
         // Physical type
-        *context.get_slave_mut(slave).physical_type_mut() = low_byte(
-            fprdw(
-                context.port_mut(),
-                config_address,
-                EthercatRegister::PortDescriptor,
-                TIMEOUT_RETURN3,
-            )?
-            .to_host(),
-        );
+        if let Ok(physical_type) = fprdw(
+            context.port_mut(),
+            config_address,
+            EthercatRegister::PortDescriptor,
+            TIMEOUT_RETURN3,
+        ) {
+            *context.get_slave_mut(slave).physical_type_mut() = low_byte(physical_type.to_host());
+        }
 
         search_parent(context, slave);
 
         // Check state change init
-        context.check_state(slave, EthercatState::Init, TIMEOUT_STATE)?;
+        let _ = context.check_state(slave, EthercatState::Init, TIMEOUT_STATE);
 
         // Set default mailbox configuration if slave has mailbox
         if context.get_slave(slave).mailbox().length() > 0 {
-            configure_mailbox(context, slave, &mut eeprom_requests)?;
+            configure_mailbox(context, slave);
         }
+    }
+    for eeprom_request in eeprom_requests {
+        let slave = eeprom_request.slave();
+        if let Ok(mailbox_protocols) = eeprom_request.read_eeprom_data(context, TIMEOUT_EEPROM) {
+            *context.get_slave_mut(slave).mailbox_mut().protocols_mut() =
+                mailbox_protocols.to_host() as u16;
+        }
+    }
 
-        let config_index = if use_table {
-            config_from_table(context, slave)
-        } else {
-            0
-        };
-
+    for slave in 1..context.slave_count() {
+        let config_address = context.get_slave(slave).config_address();
         // Slave not in configuration table, find out via SII
-        if config_index == 0 && !lookup_previous_sii(context, slave) {
-            configure_slave_with_sii(context, slave)?;
+        if !lookup_previous_sii(context, slave) {
+            configure_slave_with_sii(context, slave);
         }
         if context.get_slave(slave).mailbox().length() > 0 {
-            configure_sync_manager(context, slave, config_address)?;
+            configure_sync_manager(context, slave, config_address);
         }
 
         // Some slaves need eeprom available to PDI in init -> preop transition
-        context.eeprom_to_pdi(slave)?;
-
         // User may override automatic state change
-        if !context.manual_state_change() {
+        if context.eeprom_to_pdi(slave).is_ok() && !context.manual_state_change() {
             // Request pre-op for slave
-            fpwrw(
+            let _ = fpwrw(
                 context.port_mut(),
                 config_address,
                 EthercatRegister::ApplicationLayerControl,
@@ -889,7 +892,7 @@ pub fn config_init(context: &mut Context, use_table: bool) -> Result<u16, Config
                     EthercatState::PreOperational as u16 | EthercatState::Error as u16,
                 ),
                 TIMEOUT_RETURN3,
-            )?;
+            );
         }
     }
 
@@ -908,13 +911,12 @@ pub fn lookup_mapping(
     input_size: &mut u32,
 ) -> bool {
     if slave > 1 && context.slave_count() > 0 {
-        let slave_usize = usize::from(slave);
         let requested_slave = &context.get_slave(slave);
         let found_slave = context
             .slavelist()
             .iter()
             .enumerate()
-            .take(slave_usize)
+            .take(slave.into())
             .skip(1)
             .find(|(_, current_slave)| {
                 current_slave.eeprom().manufacturer() == requested_slave.eeprom().manufacturer()
@@ -951,13 +953,9 @@ pub fn lookup_mapping(
 /// Returns an error if:
 /// - The state of the slave couldn't be checked.
 /// - PDO map couldn't be read/parsed
-pub fn map_coe_soe(
-    context: &mut Context,
-    slave: u16,
-    thread_number: usize,
-) -> Result<(), CoEError> {
+fn map_coe_soe(context: &mut Context, slave: u16, thread_number: usize) {
     // Check state change pre-op
-    context.check_state(slave, EthercatState::PreOperational, TIMEOUT_STATE)?;
+    let _ = context.check_state(slave, EthercatState::PreOperational, TIMEOUT_STATE);
 
     ec_println!(
         " >Slave {slave}, configaddr {:x}, state {:2.2x}",
@@ -979,7 +977,7 @@ pub fn map_coe_soe(
 
     // If slave not found in configlist, find IO mapping in slave self
     if context.get_slave(slave).config_index() == 0 {
-        return Ok(());
+        return;
     }
     let mut input_size = 0;
     let mut output_size = 0;
@@ -1000,22 +998,20 @@ pub fn map_coe_soe(
             != 0
         {
             // Read PDO mapping via CANopen over EtherCAT using complete access
-            match read_pdo_map_complete_access(
+            initialized = read_pdo_map_complete_access(
                 context,
                 slave,
                 thread_number,
                 &mut output_size,
                 &mut input_size,
-            ) {
-                Err(e) => return Err(e),
-                Ok(_) => initialized = true,
-            }
+            )
+            .is_ok_and(|initialized| initialized);
         }
 
         // Complete access not available or failed
         if !initialized {
             // Read PDO mapping via CANopen over EtherCAT
-            read_pdo_map(context, slave, &mut output_size, &mut input_size)?;
+            let _ = read_pdo_map(context, slave, &mut output_size, &mut input_size);
         }
 
         ec_println!("  CoE ouput_size:{output_size} input_size: {input_size}");
@@ -1029,7 +1025,7 @@ pub fn map_coe_soe(
             != 0
     {
         // Read AT/MDT mapping via Servo over EtherCAT
-        read_id_nmap(context, slave, &mut output_size, &mut input_size)?;
+        let _ = read_id_nmap(context, slave, &mut output_size, &mut input_size);
         *context
             .get_slave_mut(slave)
             .get_sync_manager_mut(2)
@@ -1042,11 +1038,9 @@ pub fn map_coe_soe(
     }
     *context.get_slave_mut(slave).output_bits_mut() = output_size as u16;
     *context.get_slave_mut(slave).input_bits_mut() = input_size as u16;
-
-    Ok(())
 }
 
-fn map_sii(context: &mut Context, slave: u16) -> Result<(), MainError> {
+fn map_sii(context: &mut Context, slave: u16) {
     let mut output_size = u32::from(context.get_slave(slave).output_bits());
     let mut input_size = u32::from(context.get_slave(slave).input_bits());
 
@@ -1058,30 +1052,52 @@ fn map_sii(context: &mut Context, slave: u16) -> Result<(), MainError> {
     // Find PDO mapping by SII
     if input_size == 0 && output_size == 0 {
         let eepdo;
-        (input_size, eepdo) = EepromPdo::sii_pdo(context, slave, false)?;
+        (input_size, eepdo) = EepromPdo::sii_pdo(context, slave, false).unwrap_or_default();
 
         ec_println!("  SII input_size:{input_size}");
         for sm_index in 0..MAX_SM {
-            if eepdo.get_sync_manager_bit_size(sm_index) > 0 {
-                *context
-                    .get_slave_mut(slave)
-                    .get_sync_manager_mut(sm_index)
-                    .sm_length_mut() =
-                    Ethercat::from_host(eepdo.get_sync_manager_bit_size(sm_index).div_ceil(8));
-                *context
-                    .get_slave_mut(slave)
-                    .get_sync_manager_type_mut(sm_index) = SyncManagerType::Inputs;
-                ec_println!(
-                    "    SM{sm_index} length {}",
-                    eepdo.get_sync_manager_bit_size(sm_index)
-                );
+            if eepdo.get_sync_manager_bit_size(sm_index) == 0 {
+                continue;
             }
+            *context
+                .get_slave_mut(slave)
+                .get_sync_manager_mut(sm_index)
+                .sm_length_mut() =
+                Ethercat::from_host(eepdo.get_sync_manager_bit_size(sm_index).div_ceil(8));
+            *context
+                .get_slave_mut(slave)
+                .get_sync_manager_type_mut(sm_index) = SyncManagerType::Inputs;
+            ec_println!(
+                "    SM{sm_index} length {}",
+                eepdo.get_sync_manager_bit_size(sm_index)
+            );
+        }
+
+        let eepdo;
+        (output_size, eepdo) = EepromPdo::sii_pdo(context, slave, true).unwrap_or_default();
+
+        ec_println!("  SII out_size:{input_size}");
+        for sm_index in 0..MAX_SM {
+            if eepdo.get_sync_manager_bit_size(sm_index) == 0 {
+                continue;
+            }
+            *context
+                .get_slave_mut(slave)
+                .get_sync_manager_mut(sm_index)
+                .sm_length_mut() =
+                Ethercat::from_host(eepdo.get_sync_manager_bit_size(sm_index).div_ceil(8));
+            *context
+                .get_slave_mut(slave)
+                .get_sync_manager_type_mut(sm_index) = SyncManagerType::Outputs;
+            ec_println!(
+                "    SM{sm_index} length {}",
+                eepdo.get_sync_manager_bit_size(sm_index)
+            );
         }
     }
     *context.get_slave_mut(slave).output_bits_mut() = output_size as u16;
     *context.get_slave_mut(slave).input_bits_mut() = input_size as u16;
     ec_println!("     input_size:{input_size} output_size:{output_size}");
-    Ok(())
 }
 
 fn map_sync_manager(
@@ -1090,7 +1106,7 @@ fn map_sync_manager(
     config_address: u16,
     sync_manager_index: u8,
     ethercat_register: EthercatRegister,
-) -> Result<(), NicdrvError> {
+) {
     if context.get_slave(slave).mailbox().length() == 0
         && !context
             .get_slave(slave)
@@ -1100,16 +1116,19 @@ fn map_sync_manager(
     {
         let sync_manager = context
             .get_slave(slave)
-            .get_sync_manager(sync_manager_index);
-        fpwr(
+            .get_sync_manager(sync_manager_index)
+            .bytes();
+
+        let _ = fpwr(
             context.port_mut(),
             config_address,
             ethercat_register as u16,
-            &sync_manager.bytes()?,
+            &sync_manager,
             TIMEOUT_RETURN3,
-        )?;
+        );
+
         ec_println!(
-            "    SM0 type:{:?} StartAddress:{:4.4x} Flags:{:8.8x}",
+            "    SM{sync_manager_index} type:{:?} StartAddress:{:4.4x} Flags:{:8.8x}",
             context
                 .get_slave(slave)
                 .get_sync_manager_type(sync_manager_index),
@@ -1125,10 +1144,9 @@ fn map_sync_manager(
                 .to_host()
         );
     }
-    Ok(())
 }
 
-fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
+fn map_sm(context: &mut Context, slave: u16) {
     let config_address = context.get_slave(slave).config_address();
 
     ec_println!("  SM programming");
@@ -1138,76 +1156,75 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
         config_address,
         0,
         EthercatRegister::SyncManager0,
-    )?;
+    );
     map_sync_manager(
         context,
         slave,
         config_address,
         1,
         EthercatRegister::SyncManager1,
-    )?;
+    );
 
     // Program SM2 to SMx
     for sm_index in 2..MAX_SM {
-        if !context
+        if context
             .get_slave(slave)
             .get_sync_manager(sm_index)
             .start_address()
             .is_zero()
         {
-            // Check if SM length is zero -> clear enable flag
-            *context
-                .get_slave_mut(slave)
-                .get_sync_manager_mut(sm_index)
-                .sm_flags_mut() = if context
+            continue;
+        }
+        // Check if SM length is zero -> clear enable flag
+        *context
+            .get_slave_mut(slave)
+            .get_sync_manager_mut(sm_index)
+            .sm_flags_mut() = Ethercat::from_host(
+            if context
                 .get_slave(slave)
                 .get_sync_manager(sm_index)
                 .sm_length()
                 .is_zero()
             {
-                Ethercat::from_host(
-                    context
-                        .get_slave(slave)
-                        .get_sync_manager(sm_index)
-                        .sm_flags()
-                        .to_host()
-                        & SYNC_MANAGER_ENABLE_MASK,
-                )
-            } else {
-                // If SM length is non zero, always set the enable flag
-                Ethercat::from_host(
-                    context
-                        .get_slave(slave)
-                        .get_sync_manager(sm_index)
-                        .sm_flags()
-                        .to_host()
-                        | !SYNC_MANAGER_ENABLE_MASK,
-                )
-            };
-            let sync_manager = context.get_slave(slave).get_sync_manager(sm_index);
-            fpwr(
-                context.port_mut(),
-                config_address,
-                u16::from(EthercatRegister::SyncManager0)
-                    + u16::from(sm_index) * size_of::<SyncManager>() as u16,
-                &sync_manager.bytes()?,
-                TIMEOUT_RETURN3,
-            )?;
-            ec_println!(
-                "    SM{sm_index} Type:{:?} StartAddress:{:4.4x} Flags:{:8.8x}",
-                context.get_slave(slave).get_sync_manager_type(sm_index),
-                context
-                    .get_slave(slave)
-                    .get_sync_manager(sm_index)
-                    .start_address()
-                    .to_host(),
                 context
                     .get_slave(slave)
                     .get_sync_manager(sm_index)
                     .sm_flags()
                     .to_host()
-            );
-        }
+                    & SYNC_MANAGER_ENABLE_MASK
+            } else {
+                // If SM length is non zero, always set the enable flag
+                context
+                    .get_slave(slave)
+                    .get_sync_manager(sm_index)
+                    .sm_flags()
+                    .to_host()
+                    | !SYNC_MANAGER_ENABLE_MASK
+            },
+        );
+        let sync_manager = context.get_slave(slave).get_sync_manager(sm_index).bytes();
+        let _ = fpwr(
+            context.port_mut(),
+            config_address,
+            u16::from(EthercatRegister::SyncManager0)
+                + u16::from(sm_index) * size_of::<SyncManager>() as u16,
+            &sync_manager,
+            TIMEOUT_RETURN3,
+        );
+        ec_println!(
+            "    SM{sm_index} Type:{:?} StartAddress:{:4.4x} Flags:{:8.8x}",
+            context.get_slave(slave).get_sync_manager_type(sm_index),
+            context
+                .get_slave(slave)
+                .get_sync_manager(sm_index)
+                .start_address()
+                .to_host(),
+            context
+                .get_slave(slave)
+                .get_sync_manager(sm_index)
+                .sm_flags()
+                .to_host()
+        );
     }
     if context.get_slave(slave).input_bits() > 7 {
         *context.get_slave_mut(slave).input_bytes_mut() =
@@ -1217,30 +1234,28 @@ fn map_sm(context: &mut Context, slave: u16) -> Result<(), NicdrvError> {
         *context.get_slave_mut(slave).output_bytes_mut() =
             context.get_slave(slave).output_bits().div_ceil(8);
     }
-    Ok(())
 }
 
 /// # Errors
 /// Returns an error if:
 /// - The state of a slave couldn't be checked
 /// - A PDO map couldn't be parsed
-pub fn config_find_mappings(context: &mut Context, group: u8) -> Result<(), ConfigError> {
+pub fn config_find_mappings(context: &mut Context, group: u8) {
     // Find CANopen over EtherCAT and Servo over EtherCAT mapping of slaves in multiple threads
     for slave in 1..context.slave_count() {
         if group == 0 || group == context.get_slave_mut(slave).group() {
             // Serialized version
-            map_coe_soe(context, slave, 0)?;
+            map_coe_soe(context, slave, 0);
         }
     }
 
     // Find SII mapping of slave and program
     for slave in 1..context.slave_count() {
         if group == 0 || group == context.get_slave(slave).group() {
-            map_sii(context, slave)?;
-            map_sm(context, slave)?;
+            map_sii(context, slave);
+            map_sm(context, slave);
         }
     }
-    Ok(())
 }
 
 fn fmmu_count(context: &mut Context, slave: u16) -> u8 {
@@ -1259,7 +1274,6 @@ fn fmmu_count(context: &mut Context, slave: u16) -> u8 {
 }
 
 fn find_input_sync_manager(context: &mut Context, slave: u16, sm_count: &mut u8) {
-    *sm_count += 1;
     while *sm_count < MAX_SM - 1
         && context.get_slave(slave).get_sync_manager_type(*sm_count) != SyncManagerType::Inputs
     {
@@ -1278,9 +1292,10 @@ fn find_fmmu_input_address_end(
 ) {
     // More SM for input
     while *bit_count < context.get_slave(slave).input_bits() && *sm_count < MAX_SM - 1 {
+        *sm_count += 1;
         find_input_sync_manager(context, slave, sm_count);
 
-        // If addresses from more SM connect use one FMMU
+        // Use the same FMMU for connected synchronization managers
         if context
             .get_slave(slave)
             .get_sync_manager(*sm_count)
@@ -1397,7 +1412,7 @@ fn program_fmmu_for_input(
     config_address: u16,
     fmmu_count: u8,
     add_to_inputs_wkc: &mut bool,
-) -> Result<(), NicdrvError> {
+) {
     *context
         .get_slave_mut(slave)
         .get_fmmu_mut(fmmu_count)
@@ -1412,20 +1427,19 @@ fn program_fmmu_for_input(
         .fmmu_active_mut() = true;
 
     // Program FMMU for input
-    let fmmu = context.get_slave(slave).get_fmmu(fmmu_count);
-    fpwr(
+    let fmmu = context.get_slave(slave).get_fmmu(fmmu_count).bytes();
+    let _ = fpwr(
         context.port_mut(),
         config_address,
         EthercatRegister::FieldbusMemoryManagementUnit0 as u16
             + u16::from(fmmu_count) * size_of::<Fmmu>() as u16,
-        &fmmu.bytes()?,
+        &fmmu,
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Set flag to add one for an input FMMU,
     // a single ESC can only contribute once.
     *add_to_inputs_wkc = true;
-    Ok(())
 }
 
 fn configure_fmmu_input_start<'context>(
@@ -1441,15 +1455,18 @@ fn configure_fmmu_input_start<'context>(
             .get_fmmu(fmmu_count)
             .log_start()
             .to_host()
+            + context
+                .get_slave(slave)
+                .get_fmmu(fmmu_count)
+                .log_start()
+                .to_host()
             - context.get_group(group).logical_start_address()
-            - u32::from(context.get_slave(slave).output_bytes())
     } else {
         context
             .get_slave(slave)
             .get_fmmu(fmmu_count)
             .log_start()
             .to_host()
-            - u32::from(context.get_slave(slave).output_bytes())
     };
     *context.get_slave_mut(slave).io_map_mut() = io_map;
 
@@ -1474,7 +1491,7 @@ fn config_create_input_mappings<'a, 'b: 'a>(
     slave: u16,
     log_address: &mut u32,
     bit_position: &mut u8,
-) -> Result<(), NicdrvError> {
+) {
     ec_println!(" =Slave {slave}, INPUT MAPPING");
 
     let config_address = context.get_slave(slave).config_address();
@@ -1490,11 +1507,7 @@ fn config_create_input_mappings<'a, 'b: 'a>(
     let mut add_to_inputs_wkc = false;
     while sm_count < MAX_SM && fmmu_done < context.get_slave(slave).input_bits().div_ceil(8) {
         ec_println!("    FMMU {fmmu_count}");
-        while sm_count < MAX_SM - 1
-            && context.get_slave(slave).get_sync_manager_type(sm_count) != SyncManagerType::Inputs
-        {
-            sm_count += 1;
-        }
+        find_input_sync_manager(context, slave, &mut sm_count);
 
         ec_println!("      SM{sm_count}");
         *context
@@ -1529,7 +1542,7 @@ fn config_create_input_mappings<'a, 'b: 'a>(
         );
 
         // Bit oriented slave
-        let fmmu_size = if context.get_slave(slave).input_bytes() == 0 {
+        fmmu_done += if context.get_slave(slave).input_bytes() == 0 {
             configure_fmmu_input_bit_oriented_slave(
                 context,
                 slave,
@@ -1549,7 +1562,6 @@ fn config_create_input_mappings<'a, 'b: 'a>(
             )
         };
 
-        fmmu_done += fmmu_size;
         if !context
             .get_slave(slave)
             .get_fmmu(fmmu_count)
@@ -1562,7 +1574,7 @@ fn config_create_input_mappings<'a, 'b: 'a>(
                 config_address,
                 fmmu_count,
                 &mut add_to_inputs_wkc,
-            )?;
+            );
         }
         if context.get_slave(slave).input().is_none() {
             configure_fmmu_input_start(context, slave, group, io_map, fmmu_count);
@@ -1576,7 +1588,6 @@ fn config_create_input_mappings<'a, 'b: 'a>(
     if add_to_inputs_wkc {
         *context.get_group_mut(group).work_counter_inputs_mut() += 1;
     }
-    Ok(())
 }
 
 fn configure_fmmu_output_bit_oriented_slave(
@@ -1667,7 +1678,7 @@ fn program_fmmu_for_output(
     config_address: u16,
     fmmu_count: u8,
     add_to_outputs_wkc: &mut bool,
-) -> Result<(), NicdrvError> {
+) {
     *context
         .get_slave_mut(slave)
         .get_fmmu_mut(fmmu_count)
@@ -1682,20 +1693,27 @@ fn program_fmmu_for_output(
         .fmmu_active_mut() = true;
 
     // Program FMMU for output
-    let fmmu = context.get_slave(slave).get_fmmu(fmmu_count);
-    fpwr(
+    let fmmu = context.get_slave(slave).get_fmmu(fmmu_count).bytes();
+    let _ = fpwr(
         context.port_mut(),
         config_address,
         EthercatRegister::FieldbusMemoryManagementUnit0 as u16
             + u16::from(fmmu_count) * size_of::<Fmmu>() as u16,
-        &fmmu.bytes()?,
+        &fmmu,
         TIMEOUT_RETURN3,
-    )?;
+    );
 
     // Set flag to add one for an input FMMU.
     // A single ESC can only contribute once.
     *add_to_outputs_wkc = true;
-    Ok(())
+}
+
+fn find_output_sync_manager(context: &mut Context, slave: u16, sm_count: &mut u8) {
+    while *sm_count < MAX_SM - 1
+        && context.get_slave(slave).get_sync_manager_type(*sm_count) != SyncManagerType::Outputs
+    {
+        *sm_count += 1;
+    }
 }
 
 fn find_fmmu_output_address_end(
@@ -1709,17 +1727,13 @@ fn find_fmmu_output_address_end(
 ) {
     while *bit_count < context.get_slave(slave).output_bits() && *sm_count < MAX_SM - 1 {
         *sm_count += 1;
-        while *sm_count < MAX_SM - 1
-            && context.get_slave(slave).get_sync_manager_type(*sm_count) != SyncManagerType::Outputs
-        {
-            *sm_count += 1;
-        }
+        find_output_sync_manager(context, slave, sm_count);
 
         // If addresses from more SM connect use one FMMU, otherwise break up in multiple FMMU
         if context
             .get_slave(slave)
             .get_sync_manager(*sm_count)
-            .sm_length()
+            .start_address()
             .to_host()
             > *end_address
         {
@@ -1733,12 +1747,13 @@ fn find_fmmu_output_address_end(
             .sm_length()
             .to_host();
         *byte_count += *sm_length;
-        *bit_count += *sm_length;
+        *bit_count += *sm_length * 8;
         *end_address = context
             .get_slave(slave)
             .get_sync_manager(*sm_count)
             .start_address()
-            .to_host();
+            .to_host()
+            + *sm_length;
     }
 }
 
@@ -1783,7 +1798,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
     slave: u16,
     log_address: &mut u32,
     bit_position: &mut u8,
-) -> Result<(), NicdrvError> {
+) {
     let mut bit_count = 0;
     let mut fmmu_done = 0;
     let mut add_to_outputs_wkc = false;
@@ -1798,11 +1813,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
     // Search for SM's that contribute to the output mapping
     while sm_count < MAX_SM && fmmu_done < context.get_slave(slave).output_bits().div_ceil(8) {
         ec_println!("    FMMU {fmmu_count}");
-        while sm_count < MAX_SM - 1
-            && context.get_slave(slave).get_sync_manager_type(sm_count) != SyncManagerType::Outputs
-        {
-            sm_count += 1;
-        }
+        find_output_sync_manager(context, slave, &mut sm_count);
         ec_println!("      SM{sm_count}");
         *context
             .get_slave_mut(slave)
@@ -1836,7 +1847,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
         );
 
         // Bit oriented slave
-        let fmmu_size = if context.get_slave(slave).output_bytes() == 0 {
+        fmmu_done += if context.get_slave(slave).output_bytes() == 0 {
             configure_fmmu_output_bit_oriented_slave(
                 context,
                 slave,
@@ -1856,7 +1867,6 @@ fn config_create_output_mappings<'a, 'b: 'a>(
                 fmmu_done,
             )
         };
-        fmmu_done += fmmu_size;
 
         if !context
             .get_slave(slave)
@@ -1870,7 +1880,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
                 config_address,
                 fmmu_count,
                 &mut add_to_outputs_wkc,
-            )?;
+            );
         }
 
         if context.get_slave(slave).outputs().is_none() {
@@ -1884,8 +1894,6 @@ fn config_create_output_mappings<'a, 'b: 'a>(
     if add_to_outputs_wkc {
         *context.get_group_mut(group).work_counter_outputs_mut() += 1;
     }
-
-    Ok(())
 }
 
 fn main_config_map_group<'context, 'io_map: 'context>(
@@ -1908,7 +1916,7 @@ fn main_config_map_group<'context, 'io_map: 'context>(
     *context.get_group_mut(group).work_counter_inputs_mut() = 0;
 
     // Find mappings and program synchronization managers
-    config_find_mappings(context, group)?;
+    config_find_mappings(context, group);
 
     // Do output mapping of slave and program FMMUs
     for slave in 1..context.slave_count() {
@@ -1922,7 +1930,7 @@ fn main_config_map_group<'context, 'io_map: 'context>(
                     slave,
                     &mut logical_address,
                     &mut bit_position,
-                )?;
+                );
 
                 // Force byte alignment if the output < 8 bits
                 if force_byte_alignment && bit_position != 0 {
@@ -1994,7 +2002,7 @@ fn main_config_map_group<'context, 'io_map: 'context>(
                 slave,
                 &mut logical_address,
                 &mut bit_position,
-            )?;
+            );
 
             // Force byte alignment if the input < 8 bits
             if force_byte_alignment && bit_position != 0 {
@@ -2160,7 +2168,7 @@ pub fn config_overlap_map_group<'context, 'io_map: 'context>(
         *context.get_group_mut(group).work_counter_inputs_mut() = 0;
 
         // Find mappings and program syncmanagers
-        config_find_mappings(context, group)?;
+        config_find_mappings(context, group);
 
         // Do IO mapping of slave and program FMMUs
         for slave in 1..context.slave_count() {
@@ -2177,7 +2185,7 @@ pub fn config_overlap_map_group<'context, 'io_map: 'context>(
                         slave,
                         &mut so_logical_address,
                         &mut bit_position,
-                    )?;
+                    );
 
                     if bit_position != 0 {
                         so_logical_address += 1;
@@ -2194,7 +2202,7 @@ pub fn config_overlap_map_group<'context, 'io_map: 'context>(
                         slave,
                         &mut si_logical_address,
                         &mut bit_position,
-                    )?;
+                    );
 
                     if bit_position != 0 {
                         si_logical_address += 1;
@@ -2443,13 +2451,13 @@ pub fn reconfig_slave(
                 .start_address()
                 .is_zero()
             {
-                let sync_manager = context.get_slave(slave).get_sync_manager(sm_index);
+                let sync_manager = context.get_slave(slave).get_sync_manager(sm_index).bytes();
                 fpwr(
                     context.port_mut(),
                     config_address,
                     u16::from(EthercatRegister::SyncManager0)
                         + u16::from(sm_index) * size_of::<SyncManager>() as u16,
-                    &sync_manager.bytes()?,
+                    &sync_manager,
                     timeout,
                 )?;
             }
@@ -2492,13 +2500,13 @@ pub fn reconfig_slave(
 
             // Program configured FMMU
             for fmmu_count in 0..context.get_slave(slave).fmmu_unused() {
-                let fmmu = context.get_slave(slave).get_fmmu(fmmu_count);
+                let fmmu = context.get_slave(slave).get_fmmu(fmmu_count).bytes();
                 fpwr(
                     context.port_mut(),
                     config_address,
                     u16::from(EthercatRegister::FieldbusMemoryManagementUnit0)
                         + size_of::<Fmmu>() as u16 * u16::from(fmmu_count),
-                    &fmmu.bytes()?,
+                    &fmmu,
                     timeout,
                 )?;
             }

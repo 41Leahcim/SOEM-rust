@@ -817,10 +817,10 @@ impl ServiceDataObjectService {
             + ServiceData::size()
     }
 
-    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+    pub fn bytes(&self) -> [u8; Self::size()] {
         let mut result = [0; Self::size()];
-        self.write_to(&mut result.as_mut_slice())?;
-        Ok(result)
+        self.write_to(&mut result.as_mut_slice()).unwrap();
+        result
     }
 }
 

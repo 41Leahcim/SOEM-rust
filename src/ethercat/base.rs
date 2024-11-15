@@ -87,7 +87,7 @@ pub fn setup_datagram(
                 Ethercat::from_host(data.len() as u16),
                 Ethercat::default(),
             )
-            .bytes()?,
+            .bytes(),
         )
         .unwrap();
     frame.extend_from_slice(data).unwrap();

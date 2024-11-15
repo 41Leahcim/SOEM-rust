@@ -259,7 +259,7 @@ impl Port {
 
         let header = EthernetHeader::new(PRIMARY_MAC);
         for tx_buf in result.stack_mut().tx_buffers_mut().iter_mut() {
-            tx_buf.extend_from_slice(&header.bytes()?).unwrap();
+            tx_buf.extend_from_slice(&header.bytes()).unwrap();
         }
         Ok(result)
     }
@@ -391,7 +391,7 @@ impl Port {
         ehp.source_address_mut()[1] = Network::from_host(PRIMARY_MAC[1]);
         self.stack.tx_buffer[usize::from(index)]
             .as_mut_slice()
-            .copy_from_slice(&ehp.bytes()?);
+            .copy_from_slice(&ehp.bytes());
 
         // Transmit over primary socket
         let rval = self.out_frame(index.into(), false);
@@ -409,8 +409,8 @@ impl Port {
 
             // Rewrite MAC source address 1 to secondary
             ehp.source_address_mut()[1] = Network::from_host(SECONDARY_MAC[1]);
-            tmp_buffer.copy_from_slice(&ehp.bytes()?);
-            tmp_buffer[EthernetHeader::size()..].copy_from_slice(&datagram.bytes()?);
+            tmp_buffer.copy_from_slice(&ehp.bytes());
+            tmp_buffer[EthernetHeader::size()..].copy_from_slice(&datagram.bytes());
 
             // Transmit over secondary socket
             redport.stack.rx_buffers[usize::from(index)].state = BufferState::Tx;

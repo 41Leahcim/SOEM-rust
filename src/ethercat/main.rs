@@ -232,10 +232,14 @@ impl Fmmu {
 
     /// # Errors
     /// Returns an error if the Fmmu couldn't be converted to bytes
-    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "Won't panic if Self::size is written correctly"
+    )]
+    pub fn bytes(&self) -> [u8; Self::size()] {
         let mut result = [0; Self::size()];
-        self.write_to(&mut result.as_mut_slice())?;
-        Ok(result)
+        self.write_to(&mut result.as_mut_slice()).unwrap();
+        result
     }
 
     pub const fn log_start(&self) -> Ethercat<u32> {
@@ -297,10 +301,14 @@ impl SyncManager {
 
     /// # Errors
     /// Returns an error if the SyncManager couldn't be converted to bytes
-    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "Won't panic if Self::size is written correctly"
+    )]
+    pub fn bytes(&self) -> [u8; Self::size()] {
         let mut result = [0; Self::size()];
-        self.write_to(&mut result.as_mut_slice())?;
-        Ok(result)
+        self.write_to(&mut result.as_mut_slice()).unwrap();
+        result
     }
 
     pub const fn start_address(&self) -> Ethercat<u16> {
@@ -549,6 +557,10 @@ impl SlaveMailbox {
 
     pub const fn write_offset(&self) -> u16 {
         self.write_offset
+    }
+
+    pub fn write_offset_mut(&mut self) -> &mut u16 {
+        &mut self.write_offset
     }
 
     pub fn read_length_mut(&mut self) -> &mut u16 {
@@ -852,8 +864,8 @@ impl<'slave> Slave<'slave> {
         self.sync_manager_type[usize::from(sync_manager_index)]
     }
 
-    pub fn get_sync_manager(&self, sync_manager_index: u8) -> SyncManager {
-        self.sync_manager[usize::from(sync_manager_index)]
+    pub fn get_sync_manager(&self, sync_manager_index: u8) -> &SyncManager {
+        &self.sync_manager[usize::from(sync_manager_index)]
     }
 
     pub fn get_sync_manager_mut(&mut self, sync_manager_index: u8) -> &mut SyncManager {
@@ -2091,10 +2103,14 @@ impl ApplicationLayerStatus {
 
     /// # Errors
     /// Returns an error if the application layer status couldn't be converted to bytes
-    pub fn bytes(&self) -> io::Result<[u8; Self::size()]> {
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "Won't panic if Self::size is written correctly"
+    )]
+    pub fn bytes(&self) -> [u8; Self::size()] {
         let mut result = [0; Self::size()];
-        self.write_to(&mut result.as_mut_slice())?;
-        Ok(result)
+        self.write_to(&mut result.as_mut_slice()).unwrap();
+        result
     }
 }
 
@@ -4064,6 +4080,10 @@ pub struct EepromRequest {
 }
 
 impl EepromRequest {
+    pub const fn slave(&self) -> u16 {
+        self.slave
+    }
+
     /// parallel read EEPROM from slave bypassing cache.
     /// This function sends the request to the slave.
     ///
@@ -4702,7 +4722,7 @@ fn fixed_pointer_read_multi(
         index,
         config_list[usize::from(sl_count)],
         EthercatRegister::ApplicationLayerStatus.into(),
-        &sl_status_list[usize::from(sl_count)].bytes()?,
+        &sl_status_list[usize::from(sl_count)].bytes(),
     )?;
     let mut sl_data_position = [0; MAX_FIXED_POINTER_READ_MULTI];
     sl_data_position[usize::from(sl_count)] = EthercatHeader::size();
@@ -4715,7 +4735,7 @@ fn fixed_pointer_read_multi(
             true,
             config_list[usize::from(sl_count)],
             EthercatRegister::ApplicationLayerStatus.into(),
-            &sl_status_list[usize::from(sl_count)].bytes()?,
+            &sl_status_list[usize::from(sl_count)].bytes(),
         );
     }
     sl_count = sl_count.max(number - 1);
@@ -4727,7 +4747,7 @@ fn fixed_pointer_read_multi(
             false,
             config_list[usize::from(sl_count)],
             EthercatRegister::ApplicationLayerStatus.into(),
-            &sl_status_list[usize::from(sl_count)].bytes()?,
+            &sl_status_list[usize::from(sl_count)].bytes(),
         );
     }
     port.src_confirm(index, timeout)?;
