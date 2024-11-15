@@ -3,10 +3,6 @@ name = "soem"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-#default = ["ec_ver1"]
-#ec_ver1 = []
-
 [dependencies]
 bytemuck = "1.19.0"
 heapless = "0.8"

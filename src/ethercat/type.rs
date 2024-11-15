@@ -1251,12 +1251,9 @@ impl<Int: PrimInt> Ethercat<Int> {
         self.0.is_zero()
     }
 
+    /// Converts back to big endian if the system is big endian.
     pub fn to_host(self) -> Int {
-        if cfg!(target_endian = "big") {
-            self.0.to_be()
-        } else {
-            self.0
-        }
+        self.0.to_le()
     }
 
     pub fn from_host(value: Int) -> Self {

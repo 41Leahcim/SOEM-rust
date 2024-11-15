@@ -27,13 +27,10 @@ impl<Int: PrimInt> Network<Int> {
     /// Network (i.e. big endian) to host byte order.
     ///
     /// Note that Ethercat uses little endian byte order, except for the Ethernet
-    /// header which is big endian as usual
+    /// header which is big endian as usual. To big endian is used to only flip the
+    /// bytes on little endian systems.
     pub fn to_host(self) -> Int {
-        if cfg!(target_endian = "little") {
-            self.0.to_le()
-        } else {
-            self.0
-        }
+        self.0.to_be()
     }
 }
 
@@ -45,7 +42,7 @@ macro_rules! network_bytes {
             }
 
             pub const fn from_bytes(bytes: [u8; size_of::<$data_type>()]) -> Self {
-                Self::from_raw($data_type::from_ne_bytes(bytes))
+                Self($data_type::from_ne_bytes(bytes))
             }
         }
     };
