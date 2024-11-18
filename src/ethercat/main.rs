@@ -10,6 +10,7 @@ use std::{
     array,
     io::{self, Read, Write},
     str::Utf8Error,
+    sync::atomic::{AtomicU8, Ordering},
     thread,
     time::{Duration, SystemTime},
 };
@@ -517,7 +518,7 @@ pub struct Slave<'slave> {
     pub output_bytes: u16,
 
     /// IOmap buffer
-    io_map: &'slave [u8],
+    io_map: &'slave [AtomicU8],
     input_offset: u32,
     output_offset: u32,
 
@@ -701,7 +702,7 @@ impl<'slave> Slave<'slave> {
         self.input_bytes
     }
 
-    pub fn input(&self) -> Option<&[u8]> {
+    pub fn input(&self) -> Option<&[AtomicU8]> {
         let start = self.output_offset as usize
             + usize::from(self.output_bytes)
             + self.input_offset as usize;
@@ -713,7 +714,7 @@ impl<'slave> Slave<'slave> {
         &mut self.input_offset
     }
 
-    pub fn outputs(&self) -> Option<&'slave [u8]> {
+    pub fn outputs(&self) -> Option<&'slave [AtomicU8]> {
         let start = self.output_offset as usize;
         self.io_map
             .get(start..start + usize::from(self.output_bytes))
@@ -723,14 +724,14 @@ impl<'slave> Slave<'slave> {
         &mut self.output_offset
     }
 
-    pub fn io_map_mut(&mut self) -> &mut &'slave [u8] {
+    pub fn io_map_mut(&mut self) -> &mut &'slave [AtomicU8] {
         &mut self.io_map
     }
 }
 
 impl Default for Slave<'_> {
     fn default() -> Self {
-        const DEFAULT_SLICE: &[u8] = &[];
+        const DEFAULT_SLICE: &[AtomicU8] = &[];
         Self {
             state: EthercatState::None,
             al_status_code: 0,
@@ -790,7 +791,7 @@ pub struct SlaveGroup<'io_map> {
     pub output_bytes: u32,
 
     /// IOmap buffer
-    pub io_map: &'io_map [u8],
+    pub io_map: &'io_map [AtomicU8],
 
     /// Input bytes, 0 if input bits < 8
     pub input_bytes: u32,
@@ -836,11 +837,11 @@ impl<'io_map> SlaveGroup<'io_map> {
         self.logical_start_address
     }
 
-    pub fn inputs(&mut self) -> &'io_map [u8] {
+    pub fn inputs(&mut self) -> &'io_map [AtomicU8] {
         &self.io_map[self.output_bytes as usize..]
     }
 
-    pub fn outputs(&self) -> &'io_map [u8] {
+    pub fn outputs(&self) -> &'io_map [AtomicU8] {
         &self.io_map[..self.output_bytes as usize]
     }
 
@@ -887,7 +888,7 @@ impl<'io_map> SlaveGroup<'io_map> {
 
 impl<'io_map> Default for SlaveGroup<'io_map> {
     fn default() -> Self {
-        const STATIC_SLICE: &[u8] = &[];
+        const STATIC_SLICE: &[AtomicU8] = &[];
         Self {
             logical_start_address: 0,
             output_bytes: 0,
@@ -3790,6 +3791,13 @@ impl<R: Read> ReadFrom<R> for EmergencyRequest {
     }
 }
 
+fn atomic_bytes_to_byte_vec(bytes: &[AtomicU8], byte_vec: &mut Vec<u8>) {
+    byte_vec.clear();
+    bytes
+        .iter()
+        .for_each(|byte| byte_vec.push(byte.load(Ordering::Relaxed)));
+}
+
 pub struct ProcessDataRequest;
 
 impl ProcessDataRequest {
@@ -3845,6 +3853,7 @@ impl ProcessDataRequest {
         }
 
         let mut logical_address = context.grouplist[group_usize].logical_start_address;
+        let mut byte_vec = Vec::new();
         // Check if logical read/write is blocked by one or more slaves.
         if context.grouplist[group_usize].block_logical_read_write > 0 {
             // If inputs available, generate logical read
@@ -3869,13 +3878,14 @@ impl ProcessDataRequest {
                     let index = context.port.get_index();
                     let word1 = low_word(logical_address);
                     let word2 = high_word(logical_address);
+                    atomic_bytes_to_byte_vec(&data[..sublength as usize], &mut byte_vec);
                     setup_datagram(
                         &mut context.port.stack.tx_buffers_mut()[usize::from(index)],
                         ReadCommand::LogicalRead.into(),
                         index,
                         word1,
                         word2,
-                        &data[..sublength as usize],
+                        &byte_vec,
                     )?;
                     let dc_offset = if first {
                         first = false;
@@ -3900,7 +3910,8 @@ impl ProcessDataRequest {
                     context.port.out_frame_red(index)?;
 
                     // Push index and data pointer on stack
-                    context.index_stack.push_index(index, data, dc_offset);
+                    atomic_bytes_to_byte_vec(data, &mut byte_vec);
+                    context.index_stack.push_index(index, &byte_vec, dc_offset);
                     length -= sublength;
                     logical_address += sublength;
                     data = &data[sublength as usize..];
@@ -3931,13 +3942,14 @@ impl ProcessDataRequest {
                     let word1 = low_word(logical_address);
                     let word2 = high_word(logical_address);
 
+                    atomic_bytes_to_byte_vec(&data[..sub_length as usize], &mut byte_vec);
                     setup_datagram(
                         &mut context.port.stack.tx_buffers_mut()[usize::from(index)],
                         ReadCommand::FixedReadMultipleWrite.into(),
                         index,
                         word1,
                         word2,
-                        &data[..sub_length as usize],
+                        &byte_vec,
                     )?;
                     let dc_offset = if first {
                         first = false;
@@ -3963,7 +3975,8 @@ impl ProcessDataRequest {
                     context.port.out_frame_red(index)?;
 
                     // Push index and data pointer on stack
-                    context.index_stack.push_index(index, data, dc_offset);
+                    atomic_bytes_to_byte_vec(data, &mut byte_vec);
+                    context.index_stack.push_index(index, &byte_vec, dc_offset);
 
                     length -= sub_length;
                     logical_address += sub_length;
@@ -3999,13 +4012,14 @@ impl ProcessDataRequest {
                 let word1 = low_word(logical_address);
                 let word2 = high_word(logical_address);
 
+                atomic_bytes_to_byte_vec(&data[..sub_length as usize], &mut byte_vec);
                 setup_datagram(
                     &mut context.port.stack.tx_buffers_mut()[usize::from(index)],
                     ReadCommand::LogicalReadWrite.into(),
                     index,
                     word1,
                     word2,
-                    &data[..sub_length as usize],
+                    &byte_vec,
                 )?;
 
                 let dc_offset = if first {
@@ -4034,11 +4048,8 @@ impl ProcessDataRequest {
                 // The `iomap_input_offset` compensate for where the inputs are stored
                 // in the IOmap if we use an overlapping IOmap. If a regular IOmap is
                 // used, it should always be 0.
-                context.index_stack.push_index(
-                    index,
-                    &data[io_map_input_offset as usize..],
-                    dc_offset,
-                );
+                atomic_bytes_to_byte_vec(&data[io_map_input_offset as usize..], &mut byte_vec);
+                context.index_stack.push_index(index, &byte_vec, dc_offset);
                 length -= sub_length;
                 logical_address += sub_length;
                 data = &data[sub_length as usize..];

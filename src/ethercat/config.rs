@@ -3,7 +3,10 @@
 //! After successfull initialization with `init()` or `init_redundant()`
 //! the slaves can be auto configured with this module.
 
-use std::{collections::VecDeque, fmt::Write as _, io, str::Utf8Error, time::Duration};
+use std::{
+    collections::VecDeque, fmt::Write as _, io, str::Utf8Error, sync::atomic::AtomicU8,
+    time::Duration,
+};
 
 use super::{
     base::aprd,
@@ -1399,7 +1402,7 @@ fn configure_fmmu_input_start<'context>(
     context: &mut Context<'context>,
     slave: u16,
     group: u8,
-    io_map: &'context [u8],
+    io_map: &'context [AtomicU8],
     fmmu_count: u8,
 ) {
     *context.get_slave_mut(slave).input_offset_mut() = if group != 0 {
@@ -1437,7 +1440,7 @@ fn configure_fmmu_input_start<'context>(
 /// - The mapping couldn't be send to the slave
 fn config_create_input_mappings<'a, 'b: 'a>(
     context: &mut Context<'a>,
-    io_map: &'b [u8],
+    io_map: &'b [AtomicU8],
     group: u8,
     slave: u16,
     log_address: &mut u32,
@@ -1711,7 +1714,7 @@ fn find_fmmu_output_address_end(
 fn configure_fmmu_output_start<'context>(
     context: &mut Context<'context>,
     slave: u16,
-    io_map: &'context [u8],
+    io_map: &'context [AtomicU8],
     group: u8,
     fmmu_count: u8,
 ) {
@@ -1742,7 +1745,7 @@ fn configure_fmmu_output_start<'context>(
 
 fn config_create_output_mappings<'a, 'b: 'a>(
     context: &mut Context<'a>,
-    io_map: &'b [u8],
+    io_map: &'b [AtomicU8],
     group: u8,
     slave: u16,
     log_address: &mut u32,
@@ -1847,7 +1850,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
 
 fn main_config_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [u8],
+    io_map: &'io_map mut [AtomicU8],
     group: u8,
     force_byte_alignment: bool,
 ) -> Result<u32, ConfigError> {
@@ -2052,7 +2055,7 @@ fn main_config_map_group<'context, 'io_map: 'context>(
 /// IOmap size or error
 pub fn config_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [u8],
+    io_map: &'io_map mut [AtomicU8],
     group: u8,
 ) -> Result<u32, ConfigError> {
     main_config_map_group(context, io_map, group, false)
@@ -2073,7 +2076,7 @@ pub fn config_map_group<'context, 'io_map: 'context>(
 /// IOmap size or error
 pub fn config_map_group_aligned<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [u8],
+    io_map: &'io_map mut [AtomicU8],
     group: u8,
 ) -> Result<u32, ConfigError> {
     main_config_map_group(context, io_map, group, true)
@@ -2097,7 +2100,7 @@ pub fn config_map_group_aligned<'context, 'io_map: 'context>(
 #[expect(clippy::similar_names)]
 pub fn config_overlap_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [u8],
+    io_map: &'io_map mut [AtomicU8],
     group: u8,
 ) -> Result<usize, ConfigError> {
     let mut m_logical_address;
