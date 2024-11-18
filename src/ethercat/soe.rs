@@ -465,7 +465,7 @@ pub fn read(
             Ethercat::from_host(0),
             0,
             u8::from(MailboxType::ServoOverEthercat)
-                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
         ),
         opcode: ServoOverEthercatOpcode::ReadRequest,
         incomplete: false,
@@ -492,19 +492,19 @@ pub fn read(
 
         // Slave response should be Servo over EtherCAT, read response
         let a_soe = ServoOverEthercat::read_from(&mut mailbox_in)?;
-        if a_soe.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::ServoOverEthercat)
+        if a_soe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::ServoOverEthercat)
             || a_soe.opcode != ServoOverEthercatOpcode::ReadResponse
             || a_soe.error
             || a_soe.drive_number != drive_number
             || a_soe.element_flags != element_flags
         {
             // Other slave response
-            if a_soe.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::ServoOverEthercat)
+            if a_soe.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::ServoOverEthercat)
                 && a_soe.opcode == ServoOverEthercatOpcode::ReadResponse
                 && a_soe.error
             {
                 let error_code = u16::from_ne_bytes(
-                    (&mailbox_in.as_ref()[usize::from(a_soe.mailbox_header.length().to_host())
+                    (&mailbox_in.as_ref()[usize::from(a_soe.mailbox_header.length.to_host())
                         + MailboxHeader::size()
                         - size_of::<u16>()..])[..2]
                         .try_into()
@@ -522,7 +522,7 @@ pub fn read(
             );
             return Err(ServoOverEthercatError::UnexpectedFrameReturned);
         }
-        let mut frame_data_size = a_soe.mailbox_header.length().to_host()
+        let mut frame_data_size = a_soe.mailbox_header.length.to_host()
             + (MailboxHeader::size() - ServoOverEthercat::size()) as u16;
         total_size += frame_data_size;
 
@@ -592,7 +592,7 @@ pub fn write(
 
     let mut buffer_index = 0;
     let max_data =
-        usize::from(context.get_slave(slave).mailbox().length()) - size_of::<ServoOverEthercat>();
+        usize::from(context.get_slave(slave).mailbox.length) - size_of::<ServoOverEthercat>();
     loop {
         let mut frames_left = false;
         let mut frame_data_size = parameter_buffer[buffer_index..].len();
@@ -620,9 +620,7 @@ pub fn write(
                 0,
                 // Get new mailbox counter, used for session handle
                 u8::from(MailboxType::ServoOverEthercat)
-                    + mailbox_header_set_count(
-                        context.get_slave_mut(slave).mailbox_mut().next_count(),
-                    ),
+                    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             opcode: ServoOverEthercatOpcode::WriteRequest,
             incomplete,
@@ -652,7 +650,7 @@ pub fn write(
 
         // Slave response should be Servo over Ethercat Write response
         let a_soe = ServoOverEthercat::read_from(&mut mailbox_in)?;
-        if a_soe.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::ServoOverEthercat)
+        if a_soe.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::ServoOverEthercat)
             && a_soe.opcode == ServoOverEthercatOpcode::WriteResponse
             && !a_soe.error
             && a_soe.drive_number == drive_number
@@ -661,13 +659,13 @@ pub fn write(
             // Servo over EtherCAT succeeded
             return Ok(());
         }
-        if a_soe.mailbox_header.mailbox_type() & 0xF == MailboxType::ServoOverEthercat.into()
+        if a_soe.mailbox_header.mailbox_type & 0xF == MailboxType::ServoOverEthercat.into()
             && a_soe.opcode == ServoOverEthercatOpcode::ReadResponse
             && a_soe.error
         {
             // Received an error
             let error_code = u16::from_ne_bytes(
-                mailbox_in.as_ref()[usize::from(a_soe.mailbox_header.length().to_host())
+                mailbox_in.as_ref()[usize::from(a_soe.mailbox_header.length.to_host())
                     + MailboxHeader::size()
                     - size_of::<u16>()..][..2]
                     .try_into()

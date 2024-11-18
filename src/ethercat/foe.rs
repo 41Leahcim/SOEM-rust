@@ -177,7 +177,7 @@ pub fn read(
     mailbox_in.receive(context, slave, Duration::default())?;
 
     let mut foe = FileOverEthercat::default();
-    let max_data = usize::from(context.get_slave(slave).mailbox().length() - 12);
+    let max_data = usize::from(context.get_slave(slave).mailbox.length - 12);
 
     // Limit the size of the filename to `MAX_FOE_DATA` or `max_data`
     file_name = &file_name[..(0..=file_name.len().min(MAX_FOE_DATA).min(max_data))
@@ -185,13 +185,13 @@ pub fn read(
         .find(|&length| file_name.get(..length).is_some())
         .unwrap_or_default()];
 
-    *foe.mailbox_header.length_mut() = Ethercat::from_host(6 + file_name.len() as u16);
+    foe.mailbox_header.length = Ethercat::from_host(6 + file_name.len() as u16);
     *foe.mailbox_header.address_mut() = Ethercat::from_host(0);
     *foe.mailbox_header.priority_mut() = 0;
 
     // Get new mailbox count value, used as session handle
-    *foe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::FileOverEthercat)
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
+    foe.mailbox_header.mailbox_type = u8::from(MailboxType::FileOverEthercat)
+        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count());
     foe.opcode = FileOverEthercatOpcode::Read;
     foe.packet_info = PacketInfo::Password(Ethercat::from_host(password));
 
@@ -216,13 +216,13 @@ pub fn read(
 
         // Slave response should be File over Ethercat
         let a_foe = FileOverEthercat::read_from(&mut mailbox_in)?;
-        if a_foe.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::FileOverEthercat) {
+        if a_foe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::FileOverEthercat) {
             return Err(ErrorType::PacketError.into());
         }
         // Slave response should be a data response File over Ethercat
         match a_foe.opcode {
             FileOverEthercatOpcode::Data => {
-                let segment_data = a_foe.mailbox_header.length().to_host() - 6;
+                let segment_data = a_foe.mailbox_header.length.to_host() - 6;
                 let packetnumber = a_foe.packet_info.inner().to_host();
                 previous_packet += 1;
                 if packetnumber != previous_packet
@@ -236,15 +236,13 @@ pub fn read(
                 if usize::from(segment_data) == max_data {
                     work_to_do = true;
                 }
-                *foe.mailbox_header.length_mut() = Ethercat::from_host(6);
+                foe.mailbox_header.length = Ethercat::from_host(6);
                 *foe.mailbox_header.address_mut() = Ethercat::from_host(0);
                 *foe.mailbox_header.priority_mut() = 0;
 
                 // Get new mailbox count value
-                *foe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::FileOverEthercat)
-                    + mailbox_header_set_count(
-                        context.get_slave_mut(slave).mailbox_mut().next_count(),
-                    );
+                foe.mailbox_header.mailbox_type = u8::from(MailboxType::FileOverEthercat)
+                    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count());
                 foe.opcode = FileOverEthercatOpcode::Ack;
                 foe.packet_info = PacketInfo::PacketNumber(Ethercat::from_host(packetnumber));
                 mailbox_out.send(context, slave, TIMEOUT_TX_MAILBOX)?;
@@ -298,20 +296,20 @@ pub fn write(
     mailbox_in.receive(context, slave, Duration::default())?;
 
     let mut do_final_zero = true;
-    let max_data = usize::from(context.get_slave(slave).mailbox().length()) - 12;
+    let max_data = usize::from(context.get_slave(slave).mailbox.length) - 12;
     file_name = &file_name[..(0..=file_name.len().min(MAX_FOE_DATA).min(max_data))
         .rev()
         .find(|&length| file_name.get(..length).is_some())
         .unwrap_or_default()];
 
     let mut foe = FileOverEthercat::default();
-    *foe.mailbox_header.length_mut() = Ethercat::from_host(6 + file_name.len() as u16);
+    foe.mailbox_header.length = Ethercat::from_host(6 + file_name.len() as u16);
     *foe.mailbox_header.address_mut() = Ethercat::from_host(0);
     *foe.mailbox_header.priority_mut() = 0;
 
     // Get new mailbox count value, used as session handle
-    *foe.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::FileOverEthercat)
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
+    foe.mailbox_header.mailbox_type = u8::from(MailboxType::FileOverEthercat)
+        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count());
 
     foe.opcode = FileOverEthercatOpcode::Write;
     foe.packet_info = PacketInfo::Password(Ethercat::from_host(password));
@@ -335,7 +333,7 @@ pub fn write(
         // Read slave response
         mailbox_in.receive(context, slave, timeout)?;
         let a_foe = FileOverEthercat::read_from(&mut mailbox_in)?;
-        if a_foe.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::FileOverEthercat) {
+        if a_foe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::FileOverEthercat) {
             return Err(ErrorType::PacketError.into());
         }
         match a_foe.opcode {
@@ -363,16 +361,15 @@ pub fn write(
                     if buffer.len() - segment_data - buffer_start == 0 && segment_data == max_data {
                         do_final_zero = true;
                     }
-                    *foe.mailbox_header.length_mut() = Ethercat::from_host(6 + segment_data as u16);
+                    foe.mailbox_header.length = Ethercat::from_host(6 + segment_data as u16);
                     *foe.mailbox_header.address_mut() = Ethercat::from_host(0);
                     *foe.mailbox_header.priority_mut() = 0;
 
                     // Get new mailbox count value
-                    *foe.mailbox_header.mailbox_type_mut() =
-                        u8::from(MailboxType::FileOverEthercat)
-                            + mailbox_header_set_count(
-                                context.get_slave_mut(slave).mailbox_mut().next_count(),
-                            );
+                    foe.mailbox_header.mailbox_type = u8::from(MailboxType::FileOverEthercat)
+                        + mailbox_header_set_count(
+                            context.get_slave_mut(slave).mailbox.next_count(),
+                        );
                     foe.opcode = FileOverEthercatOpcode::Data;
                     send_packet += 1;
                     foe.packet_info = PacketInfo::PacketNumber(Ethercat::from_host(send_packet));

@@ -138,12 +138,11 @@ pub fn add_datagram(
     let mut datagram = EthercatHeader::read_from(&mut &frame[EthernetHeader::size()..]).unwrap();
 
     // Add new datargam to ethernet frame size
-    *datagram.ethercat_length_mut() = Ethercat::from_host(
-        (usize::from(datagram.ethercat_length().to_host()) + EthercatHeader::size() + data.len())
+    datagram.ethercat_length = Ethercat::from_host(
+        (usize::from(datagram.ethercat_length.to_host()) + EthercatHeader::size() + data.len())
             as u16,
     );
-    *datagram.data_length_mut() =
-        Ethercat::from_host(datagram.data_length().to_host() | DATAGRAM_FOLLOWS);
+    datagram.data_length = Ethercat::from_host(datagram.data_length.to_host() | DATAGRAM_FOLLOWS);
     datagram
         .write_to(&mut &mut frame[EthernetHeader::size()..])
         .unwrap();
@@ -152,10 +151,10 @@ pub fn add_datagram(
     datagram =
         EthercatHeader::read_from(&mut &frame[previous_length - ETHERCAT_LENGTH_SIZE..]).unwrap();
     *datagram.command_mut() = command;
-    *datagram.index_mut() = index;
+    datagram.index = index;
     *datagram.address_position_mut() = Ethercat::from_host(address_position);
     *datagram.address_offset_mut() = Ethercat::from_host(address_offset);
-    *datagram.data_length_mut() = Ethercat::from_host(if more {
+    datagram.data_length = Ethercat::from_host(if more {
         // This is not the last datagram to add
         data.len() as u16 | DATAGRAM_FOLLOWS
     } else {
@@ -204,7 +203,7 @@ fn execute_primitive_read_command(
 
     // Setup datagram
     setup_datagram(
-        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
+        &mut port.stack.tx_buffers_mut()[usize::from(index)],
         Command::ReadCommand(command),
         index,
         address_position,
@@ -217,7 +216,7 @@ fn execute_primitive_read_command(
 
     if wkc.is_ok() {
         data.copy_from_slice(
-            &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+            &port.stack.rx_buffers()[usize::from(index)].data[EthercatHeader::size()..],
         );
     }
 
@@ -240,7 +239,7 @@ fn execute_primitive_write_command(
 
     // Setup datagram
     setup_datagram(
-        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
+        &mut port.stack.tx_buffers_mut()[usize::from(index)],
         Command::WriteCommand(command),
         index,
         address_position,
@@ -708,7 +707,7 @@ pub fn lrw(
 ) -> Result<u16, NicdrvError> {
     let index = port.get_index();
     setup_datagram(
-        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
+        &mut port.stack.tx_buffers_mut()[usize::from(index)],
         Command::ReadCommand(ReadCommand::LogicalReadWrite),
         index,
         low_word(logical_address),
@@ -717,11 +716,11 @@ pub fn lrw(
     )?;
     let wkc = port.src_confirm(index, timeout);
     if wkc.is_ok()
-        && port.stack().rx_buffers()[usize::from(index)].data()[ETHERCAT_COMMAND_OFFET]
+        && port.stack.rx_buffers()[usize::from(index)].data[ETHERCAT_COMMAND_OFFET]
             == u8::from(ReadCommand::LogicalReadWrite)
     {
         data.copy_from_slice(
-            &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+            &port.stack.rx_buffers()[usize::from(index)].data[EthercatHeader::size()..],
         );
     }
     port.set_buf_stat(usize::from(index), BufferState::Empty);
@@ -749,7 +748,7 @@ pub fn lrd(
 ) -> Result<u16, NicdrvError> {
     let index = port.get_index();
     setup_datagram(
-        &mut port.stack_mut().tx_buffers_mut()[usize::from(index)],
+        &mut port.stack.tx_buffers_mut()[usize::from(index)],
         Command::ReadCommand(ReadCommand::LogicalRead),
         index,
         low_word(logical_address),
@@ -758,11 +757,11 @@ pub fn lrd(
     )?;
     let wkc = port.src_confirm(index, timeout);
     if wkc.is_ok()
-        && port.stack().rx_buffers()[usize::from(index)].data()[ETHERCAT_COMMAND_OFFET]
+        && port.stack.rx_buffers()[usize::from(index)].data[ETHERCAT_COMMAND_OFFET]
             == u8::from(ReadCommand::LogicalRead)
     {
         data.copy_from_slice(
-            &port.stack().rx_buffers()[usize::from(index)].data()[EthercatHeader::size()..],
+            &port.stack.rx_buffers()[usize::from(index)].data[EthercatHeader::size()..],
         );
     }
     port.set_buf_stat(usize::from(index), BufferState::Empty);
@@ -827,7 +826,7 @@ pub fn lrwdc(
 ) -> Result<u16, NicdrvError> {
     let index = port.get_index();
     let distributed_clock_offset = {
-        let tx_buffer = &mut port.stack_mut().tx_buffers_mut()[usize::from(index)];
+        let tx_buffer = &mut port.stack.tx_buffers_mut()[usize::from(index)];
 
         // Logical read write in first datagram
         setup_datagram(
@@ -854,7 +853,7 @@ pub fn lrwdc(
 
     let mut wkc = port.src_confirm(index, timeout);
     {
-        let rx_buffer = &mut port.stack().rx_buffers()[usize::from(index)].data();
+        let rx_buffer = &mut port.stack.rx_buffers_mut()[usize::from(index)].data;
         if wkc.is_ok() && rx_buffer[ETHERCAT_COMMAND_OFFET] == ReadCommand::LogicalReadWrite.into()
         {
             let mut response = &rx_buffer[EthercatHeader::size()..];

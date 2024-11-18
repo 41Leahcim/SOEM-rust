@@ -91,7 +91,7 @@ pub struct EthernetHeader {
     destination_address: [Network<u16>; 3],
 
     // Source MAC
-    source_address: [Network<u16>; 3],
+    pub source_address: [Network<u16>; 3],
 
     /// Ethernet type
     etype: Network<u16>,
@@ -107,14 +107,6 @@ impl EthernetHeader {
             source_address,
             etype,
         }
-    }
-
-    pub const fn source_address(&self) -> &[Network<u16>; 3] {
-        &self.source_address
-    }
-
-    pub fn source_address_mut(&mut self) -> &mut [Network<u16>; 3] {
-        &mut self.source_address
     }
 
     pub const fn ethernet_type(&self) -> Network<u16> {
@@ -196,20 +188,20 @@ impl From<InvalidCommand> for EthercatHeaderError {
 #[derive(Debug, Clone, Copy)]
 pub struct EthercatHeader {
     /// Length of etherCAT datagram
-    ethercat_length: Ethercat<u16>,
+    pub ethercat_length: Ethercat<u16>,
 
     /// EtherCAT command
     command: Command,
 
     /// Index used in SOEM for Tx to Rx recombination
-    index: u8,
+    pub index: u8,
 
     /// EtherCAT address
     address_position: Ethercat<u16>,
     address_offset: Ethercat<u16>,
 
     /// Length of data position in datagram
-    data_length: Ethercat<u16>,
+    pub data_length: Ethercat<u16>,
 
     /// Interrupt, currently unused
     interrupt: Ethercat<u16>,
@@ -287,32 +279,8 @@ impl EthercatHeader {
         }
     }
 
-    pub fn ethercat_length_mut(&mut self) -> &mut Ethercat<u16> {
-        &mut self.ethercat_length
-    }
-
-    pub const fn ethercat_length(&self) -> Ethercat<u16> {
-        self.ethercat_length
-    }
-
-    pub fn data_length_mut(&mut self) -> &mut Ethercat<u16> {
-        &mut self.data_length
-    }
-
-    pub const fn data_length(&self) -> Ethercat<u16> {
-        self.data_length
-    }
-
     pub fn command_mut(&mut self) -> &mut Command {
         &mut self.command
-    }
-
-    pub const fn index(&self) -> u8 {
-        self.index
-    }
-
-    pub fn index_mut(&mut self) -> &mut u8 {
-        &mut self.index
     }
 
     pub fn address_position_mut(&mut self) -> &mut Ethercat<u16> {

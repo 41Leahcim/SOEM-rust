@@ -82,7 +82,7 @@ const RX_PRIMARY: u16 = PRIMARY_MAC[1];
 const RX_SECONDARY: u16 = SECONDARY_MAC[1];
 
 pub struct RxBuffer {
-    data: Buffer,
+    pub data: Buffer,
     state: BufferState,
 }
 
@@ -96,14 +96,6 @@ impl Default for RxBuffer {
 }
 
 impl RxBuffer {
-    pub const fn data(&self) -> &Buffer {
-        &self.data
-    }
-
-    pub fn data_mut(&mut self) -> &mut Buffer {
-        &mut self.data
-    }
-
     pub fn set_state(&mut self, state: BufferState) {
         self.state = state;
     }
@@ -195,7 +187,7 @@ impl RedPort {
 
 /// Ethercat eXtended pointer structure to buffers, variables, and mutexes for port instantiation
 pub struct Port {
-    stack: Stack,
+    pub stack: Stack,
     sockhandle: Socket,
 
     /// Receive MAC source address
@@ -214,14 +206,6 @@ pub enum RedundancyMode<'red> {
 }
 
 impl Port {
-    pub const fn stack(&self) -> &Stack {
-        &self.stack
-    }
-
-    pub fn stack_mut(&mut self) -> &mut Stack {
-        &mut self.stack
-    }
-
     pub fn set_red_port(&mut self, red_port: RedPort) {
         self.redport = Some(red_port);
     }
@@ -258,7 +242,7 @@ impl Port {
         };
 
         let header = EthernetHeader::new(PRIMARY_MAC);
-        for tx_buf in result.stack_mut().tx_buffers_mut().iter_mut() {
+        for tx_buf in result.stack.tx_buffers_mut().iter_mut() {
             tx_buf.extend_from_slice(&header.bytes()).unwrap();
         }
         Ok(result)
@@ -388,7 +372,7 @@ impl Port {
             EthernetHeader::read_from(&mut self.stack.tx_buffer[usize::from(index)].as_slice())?;
 
         // Rewrite MAC source address 1 to primary
-        ehp.source_address_mut()[1] = Network::from_host(PRIMARY_MAC[1]);
+        ehp.source_address[1] = Network::from_host(PRIMARY_MAC[1]);
         self.stack.tx_buffer[usize::from(index)]
             .as_mut_slice()
             .copy_from_slice(&ehp.bytes());
@@ -405,10 +389,10 @@ impl Port {
                 EthercatHeader::read_from(&mut &tmp_buffer[EthernetHeader::size()..])?;
 
             // Write index to frame
-            *datagram.index_mut() = index;
+            datagram.index = index;
 
             // Rewrite MAC source address 1 to secondary
-            ehp.source_address_mut()[1] = Network::from_host(SECONDARY_MAC[1]);
+            ehp.source_address[1] = Network::from_host(SECONDARY_MAC[1]);
             tmp_buffer.copy_from_slice(&ehp.bytes());
             tmp_buffer[EthernetHeader::size()..].copy_from_slice(&datagram.bytes());
 
@@ -512,8 +496,8 @@ impl Port {
                 let ethercatp = EthercatHeader::read_from(
                     &mut &stack.rx_buffers[temp_buf].data[EthernetHeader::size()..],
                 )?;
-                let l = usize::from(ethercatp.ethercat_length().to_host() & 0x0FFF);
-                let index_found = ethercatp.index();
+                let l = usize::from(ethercatp.ethercat_length.to_host() & 0x0FFF);
+                let index_found = ethercatp.index;
 
                 // Check whether the index is the index we're looking for
                 if index_found == index {
@@ -538,7 +522,7 @@ impl Port {
                     // Mark as completed
                     stack.rx_buffers[usize::from(index)].state = BufferState::Complete;
                     self.rx_source_address_mut(secondary)[usize::from(index)] =
-                        ethernetp.source_address()[1].to_host().into();
+                        ethernetp.source_address[1].to_host().into();
                 } else if usize::from(index_found) < MAX_BUFFER_COUNT
                     && self.get_stack(secondary).rx_buffers[usize::from(index_found)].state
                         == BufferState::Tx
@@ -564,7 +548,7 @@ impl Port {
                     // Mark as received
                     stack.rx_buffers[usize::from(index_found)].state = BufferState::Rcvd;
                     self.rx_source_address_mut(secondary)[usize::from(index_found)] =
-                        ethernetp.source_address()[1].to_host().into();
+                        ethernetp.source_address[1].to_host().into();
                 }
             }
         }
@@ -638,7 +622,7 @@ impl Port {
             let received_data = self.redport.as_ref().unwrap().stack.rx_buffers[usize::from(index)]
                 .data
                 .clone();
-            let rxbuf = &mut self.stack_mut().rx_buffers[usize::from(index)].data;
+            let rxbuf = &mut self.stack.rx_buffers[usize::from(index)].data;
             rxbuf.clear();
             rxbuf.extend_from_slice(&received_data).unwrap();
         }
@@ -675,7 +659,7 @@ impl Port {
                 rx_buf
                     .extend_from_slice(
                         self.redport.as_ref().unwrap().stack.rx_buffers[usize::from(index)]
-                            .data()
+                            .data
                             .as_slice(),
                     )
                     .unwrap();

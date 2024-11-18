@@ -277,7 +277,7 @@ impl ServiceDataObject {
                     0,
                     u8::from(MailboxType::CanopenOverEthercat)
                         + mailbox_header_set_count(
-                            context.get_slave_mut(slave).mailbox_mut().next_count(),
+                            context.get_slave_mut(slave).mailbox.next_count(),
                         ),
                 ),
                 can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoRequest) << 12),
@@ -304,8 +304,7 @@ impl ServiceDataObject {
             let a_sdo = Self::read_from(&mut mailbox_in)?;
 
             // Slave response should be CANopen over EtherCAT, SDO response
-            if a_sdo.mailbox_header.mailbox_type() & 0xF
-                != u8::from(MailboxType::CanopenOverEthercat)
+            if a_sdo.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::CanopenOverEthercat)
                 || (a_sdo.can_open.to_host() >> 12) as u8 != u8::from(COEMailboxType::SdoResponse)
                 || a_sdo.command & 0xE0 != 0
             {
@@ -315,7 +314,7 @@ impl ServiceDataObject {
                 ));
             }
             // Calculate mailbox transfer size
-            let mut frame_data_size = a_sdo.mailbox_header.length().to_host() - 3;
+            let mut frame_data_size = a_sdo.mailbox_header.length.to_host() - 3;
 
             // Check if this is the last segment
             if a_sdo.command & 1 > 0 {
@@ -395,9 +394,7 @@ impl ServiceDataObject {
                 0,
                 // Get new mailbox count value, used as session handle
                 u8::from(MailboxType::CanopenOverEthercat)
-                    + mailbox_header_set_count(
-                        context.get_slave_mut(slave).mailbox_mut().next_count(),
-                    ),
+                    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoRequest) << 12),
             command: if complete_access {
@@ -429,7 +426,7 @@ impl ServiceDataObject {
         let a_sdo = Self::read_from(&mut mailbox_in)?;
 
         // Slave response should be CANopen over EtherCAT, a Service Data Object response, and use the correct index
-        if a_sdo.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::CanopenOverEthercat)
+        if a_sdo.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::CanopenOverEthercat)
             || (a_sdo.can_open.to_host() >> 12) as u8 != u8::from(COEMailboxType::SdoResponse)
             || a_sdo.index != sdo.index
         {
@@ -473,7 +470,7 @@ impl ServiceDataObject {
             }
 
             // Calculate mailblox transfer size
-            let frame_data_size = usize::from(a_sdo.mailbox_header.length().to_host() - 10);
+            let frame_data_size = usize::from(a_sdo.mailbox_header.length.to_host() - 10);
 
             // Check whether the transfer is segmented
             if frame_data_size < sdo_len {
@@ -545,9 +542,7 @@ impl ServiceDataObject {
                 0,
                 // Get new mailbox counter, used for session handle
                 u8::from(MailboxType::CanopenOverEthercat)
-                    + mailbox_header_set_count(
-                        context.get_slave_mut(slave).mailbox_mut().next_count(),
-                    ),
+                    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoRequest) << 12),
             command: if complete_access {
@@ -578,7 +573,7 @@ impl ServiceDataObject {
         let a_sdo = Self::read_from(&mut mailbox_in)?;
 
         // Response should be a SDO response send over CANopen over EtherCAT, containing the correct index and subindex
-        if a_sdo.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::CanopenOverEthercat)
+        if a_sdo.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::CanopenOverEthercat)
             || (a_sdo.can_open.to_host() >> 12) as u8 != u8::from(COEMailboxType::SdoResponse)
             || a_sdo.index != sdo.index
             || a_sdo.sub_index != sdo.sub_index
@@ -600,7 +595,7 @@ impl ServiceDataObject {
             } else {
                 (false, 1)
             };
-            *sdo.mailbox_header.length_mut() = if segments_left && frame_data_size >= 7 {
+            sdo.mailbox_header.length = if segments_left && frame_data_size >= 7 {
                 Ethercat::from_host(frame_data_size + 3)
             } else {
                 sdo.command = (1 + ((7 - frame_data_size) << 1)) as u8;
@@ -612,8 +607,8 @@ impl ServiceDataObject {
 
             // Get new mailbox counter value
 
-            *sdo.mailbox_header.mailbox_type_mut() = u8::from(MailboxType::CanopenOverEthercat)
-                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count());
+            sdo.mailbox_header.mailbox_type = u8::from(MailboxType::CanopenOverEthercat)
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count());
 
             // Service data object request
             sdo.can_open = Ethercat::from_host(u16::from(COEMailboxType::SdoRequest) << 12);
@@ -640,8 +635,7 @@ impl ServiceDataObject {
                 continue;
             }
             sdo = Self::read_from(&mut mailbox_in)?;
-            if a_sdo.mailbox_header.mailbox_type() & 0xF
-                != u8::from(MailboxType::CanopenOverEthercat)
+            if a_sdo.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::CanopenOverEthercat)
                 || (a_sdo.can_open.to_host() >> 12) as u8 != u8::from(COEMailboxType::SdoResponse)
                 || a_sdo.command & 0xE0 != 0x20
             {
@@ -690,7 +684,7 @@ impl ServiceDataObject {
         let _ = mailbox_in.receive(context, slave, Duration::default());
 
         // Data section = mailbox size - 6 mailbox - 2 CANopen over EtherCAT - 8 service data object requests
-        let max_data = context.get_slave_mut(slave).mailbox().length() - 0x10;
+        let max_data = context.get_slave_mut(slave).mailbox.length - 0x10;
 
         // For small data use expedited transfer
         if parameter_buffer.len() <= 4 && !complete_access {
@@ -706,7 +700,7 @@ impl ServiceDataObject {
                     // Get new mailbox counter, used for session handle
                     u8::from(MailboxType::CanopenOverEthercat)
                         + mailbox_header_set_count(
-                            context.get_slave_mut(slave).mailbox_mut().next_count(),
+                            context.get_slave_mut(slave).mailbox.next_count(),
                         ),
                 ),
                 can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoRequest) << 12),
@@ -728,8 +722,7 @@ impl ServiceDataObject {
             mailbox_in.receive(context, slave, timeout)?;
             let a_sdo = Self::read_from(&mut mailbox_in)?;
 
-            if a_sdo.mailbox_header.mailbox_type() & 0xF
-                != u8::from(MailboxType::CanopenOverEthercat)
+            if a_sdo.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::CanopenOverEthercat)
                 || (a_sdo.can_open.to_host() >> 12) as u8 != u8::from(COEMailboxType::SdoResponse)
                 || a_sdo.index != sdo.index
                 || a_sdo.sub_index != sdo.sub_index
@@ -894,7 +887,7 @@ impl ObjectDescription {
                 0,
                 u8::from(MailboxType::CanopenOverEthercat)
         // Get new mailbox counter value
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12),
             // Get object description request
@@ -916,11 +909,11 @@ impl ObjectDescription {
 
         let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
 
-        if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
+        if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
             && a_sdo.opcode == COEObjectDescriptionCommand::ObjectDesciptionResponse
         {
             let object_name_length =
-                (a_sdo.mailbox_header.length().to_host() - 12).min(MAX_NAME_LENGTH);
+                (a_sdo.mailbox_header.length.to_host() - 12).min(MAX_NAME_LENGTH);
             Ok(Self {
                 data_type: Datatype::try_from(u8::try_from(
                     a_sdo.data.get_word_compile_time_checked::<1>().to_host(),
@@ -1002,7 +995,7 @@ impl ObjectDescriptionList {
                 0,
                 u8::from(MailboxType::CanopenOverEthercat)
         // Get new mailbox counter value
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12),
             // Get object description list request
@@ -1041,8 +1034,7 @@ impl ObjectDescriptionList {
             };
 
             // Response should be CANopen over EtherCAT and the get object description list response
-            if a_sdo.mailbox_header.mailbox_type() & 0xF
-                != u8::from(MailboxType::CanopenOverEthercat)
+            if a_sdo.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::CanopenOverEthercat)
                 || a_sdo.opcode != COEObjectDescriptionCommand::ObjectDesciptionListRequest
             {
                 // Got unexpected response from slave
@@ -1062,9 +1054,9 @@ impl ObjectDescriptionList {
 
             let mut index_count = if first {
                 // Extract number of indexes from mailbox data size
-                (a_sdo.mailbox_header.length().to_host() - (6 + 2)) / 2
+                (a_sdo.mailbox_header.length.to_host() - (6 + 2)) / 2
             } else {
-                (a_sdo.mailbox_header.length().to_host() - 6) / 2
+                (a_sdo.mailbox_header.length.to_host() - 6) / 2
             };
 
             // Check if indexes fit in buffer structure
@@ -1202,7 +1194,7 @@ impl ObjectEntry {
                 0,
                 u8::from(MailboxType::CanopenOverEthercat)
         // Get new mailbox counter value
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             can_open: Ethercat::from_host(u16::from(COEMailboxType::SdoInfo) << 12),
             // Get object entry description request
@@ -1224,12 +1216,11 @@ impl ObjectEntry {
 
         let a_sdo = ServiceDataObjectService::read_from(&mut mailbox_in)?;
 
-        if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
+        if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
             && a_sdo.opcode == COEObjectDescriptionCommand::ObjectEntryResponse
         {
-            let object_name_length = usize::from(
-                (a_sdo.mailbox_header.length().to_host() - 16).clamp(0, MAX_NAME_LENGTH),
-            );
+            let object_name_length =
+                usize::from((a_sdo.mailbox_header.length.to_host() - 16).clamp(0, MAX_NAME_LENGTH));
             Ok(Self {
                 value_info: a_sdo.data.as_bytes()[3],
                 data_type: Datatype::try_from(
@@ -1371,7 +1362,7 @@ pub fn rx_pdo(
     let _ = mailbox_in.receive(context, slave, Duration::default());
 
     // Data section = mailbox size - 6 mailbox - 2 CANopen over EtherCAT
-    let max_data = context.get_slave(slave).mailbox().length() - 8;
+    let max_data = context.get_slave(slave).mailbox.length - 8;
     let framedatasize = (pdo_buffer.len() as u16).min(max_data);
     let sdo = ServiceDataObject {
         mailbox_header: MailboxHeader::new(
@@ -1380,7 +1371,7 @@ pub fn rx_pdo(
             0,
             u8::from(MailboxType::CanopenOverEthercat)
             // Get new mailbox counter, used for session handle
-        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+        + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
         ),
         can_open: Ethercat::from_host(
             (rx_pdo_number & 0x1FF) + (u16::from(COEMailboxType::RxPdo) << 12),
@@ -1436,7 +1427,7 @@ pub fn tx_pdo(
             0,
             u8::from(MailboxType::CanopenOverEthercat)
     // Get new mailbox counter, used for session handle
-    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
         ),
         can_open: Ethercat::from_host(
             (tx_pdo_number & 0x1FF) + ((COEMailboxType::TxPdoRR as u16) << 12),
@@ -1455,11 +1446,11 @@ pub fn tx_pdo(
     mailbox_in.receive(context, slave, timeout)?;
     let a_sdo = ServiceDataObject::read_from(&mut mailbox_in)?;
 
-    if a_sdo.mailbox_header.mailbox_type() & 0xF == u8::from(MailboxType::CanopenOverEthercat)
+    if a_sdo.mailbox_header.mailbox_type & 0xF == u8::from(MailboxType::CanopenOverEthercat)
         && a_sdo.can_open.to_host() >> 12 == u16::from(COEMailboxType::TxPdo)
     {
         // TxPDO response
-        let framedatasize = a_sdo.mailbox_header.length().to_host() - 2;
+        let framedatasize = a_sdo.mailbox_header.length.to_host() - 2;
 
         // If the parameterbuffer is large enough
         if pdo_buffer.len() >= framedatasize.into() {
@@ -1602,14 +1593,14 @@ fn read_pdo_assign_complete_access(
     )?;
 
     let pdo_assign = PdoAssign::read_from(&mut pdo_assign_bytes.as_slice())?;
-    if pdo_assign.number() == 0 {
+    if pdo_assign.number == 0 {
         return Ok(0);
     }
 
     let bit_length = pdo_assign
         .index()
         .iter()
-        .take(pdo_assign.number().into())
+        .take(pdo_assign.number.into())
         .copied()
         .map(Ethercat::to_host)
         .filter(|index| *index > 0)
@@ -1632,7 +1623,7 @@ fn read_pdo_assign_complete_access(
             let bit_length = pdo_description
                 .pdo()
                 .iter()
-                .take(pdo_description.number().into())
+                .take(pdo_description.number.into())
                 .copied()
                 .map(|long| u32::from(low_byte(long.to_host() as u16)))
                 .sum::<u32>();
@@ -1741,10 +1732,10 @@ pub fn read_pdo_map(
             .get_sync_manager_type_mut(input_sync_manager) = sync_manager_type;
 
         if sync_manager_type == SyncManagerType::Unused {
-            let flags = context
+            let flags = &mut context
                 .get_slave_mut(slave)
                 .get_sync_manager_mut(input_sync_manager)
-                .sm_flags_mut();
+                .sm_flags;
             *flags = Ethercat::from_host(flags.to_host() & SYNC_MANAGER_ENABLE_MASK);
         }
         if !matches!(
@@ -1767,10 +1758,10 @@ pub fn read_pdo_map(
             continue;
         }
 
-        *context
+        context
             .get_slave_mut(slave)
             .get_sync_manager_mut(input_sync_manager)
-            .sm_length_mut() = Ethercat::from_host(mapping_bit_size.div_ceil(8) as u16);
+            .sm_length = Ethercat::from_host(mapping_bit_size.div_ceil(8) as u16);
         *if sync_manager_type == SyncManagerType::Outputs {
             // It's an output mapping
             &mut *output_size
@@ -1812,9 +1803,9 @@ pub fn read_pdo_map_complete_access(
     input_size: &mut u32,
 ) -> Result<bool, CoEError> {
     (*input_size, *output_size) = (0, 0);
-    *context
+    context
         .get_sync_manager_communication_type_mut(thread_number)
-        .number_mut() = 0;
+        .number = 0;
 
     let mut sync_manager_communication_type: [u8; size_of::<SyncManagerCommunicationType>()] =
         context
@@ -1836,7 +1827,7 @@ pub fn read_pdo_map_complete_access(
         SyncManagerCommunicationType::try_from(sync_manager_communication_type)?;
 
     // Check whether the result from slave was positive
-    let sync_manager_count = sync_manager_communication_type.number();
+    let sync_manager_count = sync_manager_communication_type.number;
     if sync_manager_count <= 2 {
         return Err(CoEError::NotEnoughSyncManagers);
     }
@@ -1872,10 +1863,10 @@ pub fn read_pdo_map_complete_access(
 
         // Check if SyncManagr is unused -> clear enable flag
         if sync_manager_type == SyncManagerType::Unused {
-            let flags = context
+            let flags = &mut context
                 .get_slave_mut(slave)
                 .get_sync_manager_mut(input_sync_manager)
-                .sm_flags_mut();
+                .sm_flags;
             *flags = Ethercat::from_host(flags.to_host() & SYNC_MANAGER_ENABLE_MASK);
         }
         if !matches!(
@@ -1900,10 +1891,10 @@ pub fn read_pdo_map_complete_access(
             continue;
         }
 
-        *context
+        context
             .get_slave_mut(slave)
             .get_sync_manager_mut(input_sync_manager)
-            .sm_length_mut() = Ethercat::from_host(mapping_size.div_ceil(8) as u16);
+            .sm_length = Ethercat::from_host(mapping_size.div_ceil(8) as u16);
 
         *if sync_manager_type == SyncManagerType::Outputs {
             // It's an output mapping

@@ -506,7 +506,7 @@ pub fn set_ip(
             0,
             // Get new mailbox count value, used as session handle
             u8::from(MailboxType::EthernetOverEthercat)
-                | mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+                | mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
         ),
         frame_info1: Ethercat::from_host(
             u16::from(
@@ -529,7 +529,7 @@ pub fn set_ip(
     mailbox_in.receive(context, slave, timeout)?;
     let a_eoe = EthernetOverEthercat::read_from(&mut mailbox_in)?;
 
-    if a_eoe.mailbox_header.mailbox_type() & 0xF == MailboxType::EthernetOverEthercat.into() {
+    if a_eoe.mailbox_header.mailbox_type & 0xF == MailboxType::EthernetOverEthercat.into() {
         let frame_info1 = a_eoe.frame_info1.to_host();
         let result = a_eoe.info_result.inner().to_host();
 
@@ -580,7 +580,7 @@ pub fn get_ip(
             Ethercat::default(),
             0,
             u8::from(MailboxType::EthernetOverEthercat)
-                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox_mut().next_count()),
+                + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
         ),
         frame_info1: Ethercat::from_host(
             u16::from(
@@ -602,11 +602,11 @@ pub fn get_ip(
 
     // Slave response should be Ethernet over EtherCAT
     let a_eoe = EthernetOverEthercat::read_from(&mut mailbox_in)?;
-    if a_eoe.mailbox_header.mailbox_type() & 0xF == MailboxType::EthernetOverEthercat.into() {
+    if a_eoe.mailbox_header.mailbox_type & 0xF == MailboxType::EthernetOverEthercat.into() {
         return Err(EoEError::PacketError);
     }
     let frame_info1 = eoe.frame_info1.to_host();
-    let data_size = a_eoe.mailbox_header.length().to_host() - 4;
+    let data_size = a_eoe.mailbox_header.length.to_host() - 4;
     if header_frame_type_get(frame_info1 as u8)? != EoEFrameType::GetIpParameterResponse {
         return Err(EoEError::UnsupportedFrameType);
     }
@@ -676,7 +676,7 @@ pub fn send(
     timeout: Duration,
 ) -> Result<(), EoEError> {
     // Data section=mailbox size - 6 mailbox - 4 EoEh
-    let max_data = context.get_slave(slave).mailbox().length() - 0xA;
+    let max_data = context.get_slave(slave).mailbox.length - 0xA;
     let mut tx_fragment_number: u8 = 0;
     let mut tx_frame_offset: u16 = 0;
 
@@ -712,9 +712,7 @@ pub fn send(
                 0,
                 // Get new mailbox count value, used as session handle
                 u8::from(MailboxType::EthernetOverEthercat)
-                    + mailbox_header_set_count(
-                        context.get_slave_mut(slave).mailbox_mut().next_count(),
-                    ),
+                    + mailbox_header_set_count(context.get_slave_mut(slave).mailbox.next_count()),
             ),
             frame_info1: Ethercat::from_host(frame_info1),
             info_result: InfoResult::FrameInfo2(Ethercat::from_host(frame_info2)),
@@ -774,11 +772,10 @@ pub fn receive(
     while frames_left {
         // Slave response should be Ethernet over EtherCAT
         let a_eoe = EthernetOverEthercat::read_from(&mut mailbox_in)?;
-        if a_eoe.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::EthernetOverEthercat)
-        {
+        if a_eoe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::EthernetOverEthercat) {
             return Err(EoEError::PacketError);
         }
-        let data_size = a_eoe.mailbox_header.length().to_host() - 4;
+        let data_size = a_eoe.mailbox_header.length.to_host() - 4;
         let frame_info1 = a_eoe.frame_info1.to_host();
         let frame_info2 = a_eoe.info_result.inner().to_host();
 
@@ -857,10 +854,10 @@ pub fn read_fragment(
     let a_eoe = EthernetOverEthercat::read_from(mailbox_in)?;
 
     // Slave response should be Ethernet over Ethercat
-    if a_eoe.mailbox_header.mailbox_type() & 0xF != u8::from(MailboxType::EthernetOverEthercat) {
+    if a_eoe.mailbox_header.mailbox_type & 0xF != u8::from(MailboxType::EthernetOverEthercat) {
         return Err(EoEError::PacketError);
     }
-    let data_size = a_eoe.mailbox_header.length().to_host() - 4;
+    let data_size = a_eoe.mailbox_header.length.to_host() - 4;
     let frame_info1 = a_eoe.frame_info1.to_host();
     let frame_info2 = a_eoe.info_result.inner().to_host();
 
