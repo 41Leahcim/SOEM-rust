@@ -197,6 +197,7 @@ impl TryFrom<u8> for EoEFrameType {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum EoEResult {
     Success = 0,
     UnspecifiedError = 1,
@@ -310,6 +311,7 @@ impl Parameter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoResult {
     FrameInfo2(Ethercat<u16>),
     Result(Ethercat<u16>),

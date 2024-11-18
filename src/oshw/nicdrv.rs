@@ -199,7 +199,7 @@ pub struct Port {
     redport: Option<RedPort>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedundancyMode<'red> {
     None,
     Redundant(&'red str),

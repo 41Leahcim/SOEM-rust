@@ -110,6 +110,7 @@ impl Name {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListValue {
     Byte([u8; 8]),
     Word([u16; 4]),

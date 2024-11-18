@@ -317,6 +317,7 @@ struct StateStatus {
     al_status_code: u16,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum MailboxProtocol {
     AdsOverEthercat = 1,
     EthernetOverEthercat,
@@ -339,6 +340,7 @@ impl From<MailboxProtocol> for u16 {
 }
 
 /// CANopen over Ethercat Device Profile
+#[derive(Debug, PartialEq, Eq)]
 pub enum Coedet {
     ServiceDataObject = 1,
     ServiceDataObjectInfo = 2,
@@ -403,6 +405,7 @@ pub enum EepReadSize {
     Bytes8,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum SlaveResponding {
     SlaveResponds,
     SlaveLost,
@@ -1892,7 +1895,7 @@ impl<R: Read> ReadFrom<R> for PdoDescription {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketError {
     UnexpectedFrameReturned = 1,
     DataContainerTooSmallForType = 3,

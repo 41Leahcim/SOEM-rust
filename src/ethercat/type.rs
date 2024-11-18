@@ -304,7 +304,7 @@ pub const ETHERCAT_WORK_COUNTER_SIZE: usize = size_of::<u16>();
 /// Definition of datagram follows bit in EthercatHeader.data_length
 pub const DATAGRAM_FOLLOWS: u16 = 1 << 15;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EthercatState {
     /// No valid state
     None,
@@ -381,7 +381,7 @@ pub enum BufferState {
 pub struct InvalidDataType(u8);
 
 /// Ethercat data types
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Datatype {
     #[default]
     Invalid,
@@ -453,7 +453,7 @@ impl TryFrom<u8> for Datatype {
 
 pub struct InvalidWriteCommand(u8);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteCommand {
     /// No operation
     Nop = 0,
@@ -496,7 +496,7 @@ impl TryFrom<u8> for WriteCommand {
 pub struct InvalidReadCommand(u8);
 
 /// Ethernet command types
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadCommand {
     /// No operation
     Nop = 0,
@@ -568,6 +568,16 @@ pub enum Command {
     WriteCommand(WriteCommand),
 }
 
+impl PartialEq for Command {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::ReadCommand(left), Self::ReadCommand(right)) => left == right,
+            (Self::WriteCommand(left), Self::WriteCommand(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
 impl From<ReadCommand> for Command {
     fn from(value: ReadCommand) -> Self {
         Self::ReadCommand(value)
@@ -603,7 +613,7 @@ impl From<Command> for u8 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EepromCommand {
     /// No operation
     Nop = 0x0,
@@ -637,7 +647,7 @@ pub const EEPROM_STATE_MACHINE_ERROR_NACK: u16 = 0x2000;
 
 pub const SII_START: u16 = 0x40;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiiCategory {
     /// SII category strings
     String = 10,
@@ -671,7 +681,7 @@ impl From<SiiCategory> for u16 {
 }
 
 /// Item offsets in SII general section
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiiGeneralItem {
     /// Manufacturer
     Manufacturer = 8,
@@ -834,7 +844,7 @@ impl From<COEMailboxType> for u16 {
 }
 
 /// CANopen over EtherCAT Service Data Object commands
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanopenOverEthercatSdoCommand {
     /// Download initiate
     DownInit = 0x21,
@@ -992,6 +1002,7 @@ impl TryFrom<u8> for ServoOverEthercatOpcode {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum EthercatRegister {
     Type,
     PortDescriptor = 7,
@@ -1136,7 +1147,7 @@ pub const SDO_TX_PDO_ASSIGNMENT: u16 = 0x1C13;
 /// Ethercat packet type
 pub const ETH_P_ECAT: u16 = 0x88A4;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorType {
     ServiceDataObjectError,
     Emergency,
@@ -1157,7 +1168,7 @@ pub enum ErrorType {
     EthernetOverEthercatInvalidRxData,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum AbortError {
     Abort(i32),
