@@ -674,7 +674,7 @@ pub fn send(
     context: &mut Context,
     slave: u16,
     port: u8,
-    buffer: &mut [u8],
+    buffer: &[u8],
     timeout: Duration,
 ) -> Result<(), EoEError> {
     // Data section=mailbox size - 6 mailbox - 4 EoEh

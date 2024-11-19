@@ -288,7 +288,7 @@ pub fn write(
     slave: u16,
     mut file_name: &str,
     password: u32,
-    buffer: &mut [u8],
+    buffer: &[u8],
     timeout: Duration,
 ) -> Result<(), FoEError> {
     // Empty slave out mailobx if something is in it, with timeout set to 0.

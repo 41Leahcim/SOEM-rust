@@ -345,7 +345,7 @@ fn port_time(context: &Context, slave: u16, port: u8) -> Option<Duration> {
 }
 
 /// Calculate previous active port of slave
-fn previous_port(context: &mut Context, slave: u16, port: u8) -> u8 {
+fn previous_port(context: &Context, slave: u16, port: u8) -> u8 {
     let a_port = context.get_slave(slave).active_ports();
     match port {
         0 => {

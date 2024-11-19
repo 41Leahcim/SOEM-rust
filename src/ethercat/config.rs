@@ -1214,7 +1214,7 @@ pub fn config_find_mappings(context: &mut Context, group: u8) {
     }
 }
 
-fn fmmu_count(context: &mut Context, slave: u16) -> u8 {
+fn fmmu_count(context: &Context, slave: u16) -> u8 {
     if context.get_slave(slave).output_bits != 0 {
         context
             .get_slave(slave)
@@ -1229,7 +1229,7 @@ fn fmmu_count(context: &mut Context, slave: u16) -> u8 {
     }
 }
 
-fn find_input_sync_manager(context: &mut Context, slave: u16, sm_count: &mut u8) {
+fn find_input_sync_manager(context: &Context, slave: u16, sm_count: &mut u8) {
     while *sm_count < MAX_SM - 1
         && context.get_slave(slave).get_sync_manager_type(*sm_count) != SyncManagerType::Inputs
     {
@@ -1238,7 +1238,7 @@ fn find_input_sync_manager(context: &mut Context, slave: u16, sm_count: &mut u8)
 }
 
 fn find_fmmu_input_address_end(
-    context: &mut Context,
+    context: &Context,
     slave: u16,
     sm_count: &mut u8,
     bit_count: &mut u16,
@@ -1592,7 +1592,7 @@ fn configure_fmmu_output_byte_oriented_slave(
     slave: u16,
     log_address: &mut u32,
     bit_position: &mut u8,
-    byte_count: &mut u16,
+    byte_count: u16,
     fmmu_count: u8,
     fmmu_done: u16,
 ) -> u16 {
@@ -1609,7 +1609,7 @@ fn configure_fmmu_output_byte_oriented_slave(
         .get_fmmu_mut(fmmu_count)
         .log_start_bit = *bit_position;
     *bit_position = 7;
-    let mut fmmu_size = *byte_count;
+    let mut fmmu_size = byte_count;
     if fmmu_size + fmmu_done > context.get_slave(slave).output_bytes {
         fmmu_size = context.get_slave(slave).output_bytes - fmmu_done;
     }
@@ -1662,7 +1662,7 @@ fn program_fmmu_for_output(
     *add_to_outputs_wkc = true;
 }
 
-fn find_output_sync_manager(context: &mut Context, slave: u16, sm_count: &mut u8) {
+fn find_output_sync_manager(context: &Context, slave: u16, sm_count: &mut u8) {
     while *sm_count < MAX_SM - 1
         && context.get_slave(slave).get_sync_manager_type(*sm_count) != SyncManagerType::Outputs
     {
@@ -1671,7 +1671,7 @@ fn find_output_sync_manager(context: &mut Context, slave: u16, sm_count: &mut u8
 }
 
 fn find_fmmu_output_address_end(
-    context: &mut Context,
+    context: &Context,
     slave: u16,
     bit_count: &mut u16,
     byte_count: &mut u16,
@@ -1814,7 +1814,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
                 slave,
                 log_address,
                 bit_position,
-                &mut byte_count,
+                byte_count,
                 fmmu_count,
                 fmmu_done,
             )

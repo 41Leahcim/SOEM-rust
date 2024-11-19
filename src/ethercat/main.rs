@@ -608,7 +608,7 @@ pub struct Slave<'slave> {
     po2_so_config: Option<fn(slave: u16) -> i32>,
 
     /// Registered configuration function PO->SO
-    po2_so_configx: Option<fn(context: &mut Context, slave: u16) -> i32>,
+    po2_so_configx: Option<fn(context: &Context, slave: u16) -> i32>,
 
     pub name: HeaplessString<{ MAX_NAME_LENGTH as usize + 1 }>,
 }
@@ -674,7 +674,7 @@ impl<'slave> Slave<'slave> {
         self.po2_so_config
     }
 
-    pub const fn po2_so_configx(&self) -> Option<fn(context: &mut Context, u16) -> i32> {
+    pub const fn po2_so_configx(&self) -> Option<fn(context: &Context, u16) -> i32> {
         self.po2_so_configx
     }
 
@@ -1987,8 +1987,7 @@ pub struct Context<'context> {
 
     /// Registered Ethernet over ethercat hook
     #[expect(clippy::type_complexity)]
-    ethernet_over_ethercat_hook:
-        Option<fn(context: &mut Context, slave: u16, ecembx: &mut [u8]) -> i32>,
+    ethernet_over_ethercat_hook: Option<fn(context: &Context, slave: u16, ecembx: &[u8]) -> i32>,
 
     /// Flag to control legacy automatic state change or manual state change
     manual_state_change: bool,
@@ -2006,7 +2005,7 @@ impl<'context> Context<'context> {
     /// `hook`: Pointer to hook function
     pub fn set_ethernet_over_ethercat_hook(
         &mut self,
-        hook: fn(context: &mut Context, slave: u16, ece_mailbox: &mut [u8]) -> i32,
+        hook: fn(context: &Context, slave: u16, ece_mailbox: &[u8]) -> i32,
     ) {
         self.ethernet_over_ethercat_hook = Some(hook);
     }
@@ -2720,7 +2719,7 @@ impl<'context> Context<'context> {
                 fixed_pointer_read_multi(
                     self,
                     (lslave - fslave) + 1,
-                    &mut slca[..1],
+                    &slca[..1],
                     &mut sl[..1],
                     TIMEOUT_RETURN3,
                 )?;
@@ -4277,7 +4276,7 @@ impl ProcessDataRequest {
 fn fixed_pointer_read_multi(
     context: &mut Context,
     number: u16,
-    config_list: &mut [u16],
+    config_list: &[u16],
     sl_status_list: &mut [ApplicationLayerStatus],
     timeout: Duration,
 ) -> Result<(), MainError> {

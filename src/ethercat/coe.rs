@@ -514,7 +514,7 @@ impl ServiceDataObject {
     #[expect(clippy::too_many_arguments)]
     fn write_segments(
         context: &mut Context,
-        mut parameter_buffer: &mut [u8],
+        mut parameter_buffer: &[u8],
         mut max_data: u16,
         complete_access: bool,
         index: u16,
@@ -533,7 +533,7 @@ impl ServiceDataObject {
         // Copy data to mailbox
         data.as_bytes_mut()[size_of::<u32>()..]
             .copy_from_slice(&parameter_buffer[..usize::from(frame_data_size)]);
-        parameter_buffer = &mut parameter_buffer[usize::from(frame_data_size)..];
+        parameter_buffer = &parameter_buffer[usize::from(frame_data_size)..];
 
         let mut sdo = Self {
             mailbox_header: MailboxHeader::new(
@@ -618,7 +618,7 @@ impl ServiceDataObject {
 
             // Copy parameter data to mailbox
             sdo.read_from_index(&mut &parameter_buffer[..usize::from(frame_data_size)])?;
-            parameter_buffer = &mut parameter_buffer[usize::from(frame_data_size)..];
+            parameter_buffer = &parameter_buffer[usize::from(frame_data_size)..];
 
             // Send Service Data Object download request
             sdo.write_to(&mut mailbox_out)?;
@@ -648,7 +648,7 @@ impl ServiceDataObject {
         Ok(())
     }
 
-    /// CANopen over EtherCAT Service Dta Object write, blocking. Single subindex or complete access.
+    /// CANopen over EtherCAT Service Data Object write, blocking. Single subindex or complete access.
     ///
     /// A "normal" download request is issued, unless we have small data,
     /// then an "expedited" transfer is used. If the parameter is larger than
@@ -676,7 +676,7 @@ impl ServiceDataObject {
         index: u16,
         sub_index: u8,
         complete_access: bool,
-        parameter_buffer: &mut [u8],
+        parameter_buffer: &[u8],
         timeout: Duration,
     ) -> Result<(), CoEError> {
         // Empty slave out mailbox if something is in it. With timeout set to default.
@@ -1291,7 +1291,7 @@ impl ObjectEntryList {
     pub fn read(
         context: &mut Context,
         item: u16,
-        object_description_list: &mut ObjectDescriptionList,
+        object_description_list: &ObjectDescriptionList,
     ) -> Result<Self, CoEError> {
         (0..object_description_list.entries[usize::from(item)].max_sub).try_fold(
             Self::default(),

@@ -583,7 +583,7 @@ pub fn write(
     drive_number: u8,
     element_flags: u8,
     idn: u16,
-    parameter_buffer: &mut [u8],
+    parameter_buffer: &[u8],
     timeout: Duration,
 ) -> Result<(), ServoOverEthercatError> {
     let mut mailbox_in = MailboxIn::default();
