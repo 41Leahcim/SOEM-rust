@@ -182,7 +182,7 @@ impl ServiceData {
 /// Service Data Object structure, not to be confused with `ServiceDataObjectService`
 
 #[derive(Debug, Default)]
-struct ServiceDataObject {
+pub struct ServiceDataObject {
     mailbox_header: MailboxHeader,
     can_open: Ethercat<u16>,
     command: u8,
@@ -225,32 +225,32 @@ impl<W: Write> WriteTo<W> for ServiceDataObject {
 }
 
 impl ServiceDataObject {
-    pub fn read_from_index<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+    fn read_from_index<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         self.index = Ethercat::<u16>::from_bytes(<[u8; 2]>::read_from(reader)?);
         self.sub_index = u8::read_from(reader)?;
         self.data = ServiceData::Byte(<[u8; 512]>::read_from(reader)?);
         Ok(())
     }
 
-    pub fn to_bytes(&self) -> [u8; size_of::<MailboxHeader>() + 6 + 512] {
+    fn to_bytes(&self) -> [u8; size_of::<MailboxHeader>() + 6 + 512] {
         let mut bytes = [0; size_of::<MailboxHeader>() + 6 + 512];
         self.write_to(&mut bytes.as_mut_slice()).unwrap();
         bytes
     }
 
-    pub const fn mailbox_header_offset() -> usize {
+    const fn mailbox_header_offset() -> usize {
         0
     }
 
-    pub const fn can_open_offset() -> usize {
+    const fn can_open_offset() -> usize {
         Self::mailbox_header_offset() + size_of::<MailboxHeader>()
     }
 
-    pub const fn command_offset() -> usize {
+    const fn command_offset() -> usize {
         Self::can_open_offset() + size_of::<u16>()
     }
 
-    pub const fn index_offset() -> usize {
+    const fn index_offset() -> usize {
         Self::command_offset() + size_of::<u8>()
     }
 
