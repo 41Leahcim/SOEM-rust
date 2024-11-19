@@ -1850,7 +1850,7 @@ fn config_create_output_mappings<'a, 'b: 'a>(
 
 fn main_config_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [AtomicU8],
+    io_map: &'io_map [AtomicU8],
     group: u8,
     force_byte_alignment: bool,
 ) -> Result<u32, ConfigError> {
@@ -2055,7 +2055,7 @@ fn main_config_map_group<'context, 'io_map: 'context>(
 /// IOmap size or error
 pub fn config_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [AtomicU8],
+    io_map: &'io_map [AtomicU8],
     group: u8,
 ) -> Result<u32, ConfigError> {
     main_config_map_group(context, io_map, group, false)
@@ -2076,7 +2076,7 @@ pub fn config_map_group<'context, 'io_map: 'context>(
 /// IOmap size or error
 pub fn config_map_group_aligned<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [AtomicU8],
+    io_map: &'io_map [AtomicU8],
     group: u8,
 ) -> Result<u32, ConfigError> {
     main_config_map_group(context, io_map, group, true)
@@ -2100,7 +2100,7 @@ pub fn config_map_group_aligned<'context, 'io_map: 'context>(
 #[expect(clippy::similar_names)]
 pub fn config_overlap_map_group<'context, 'io_map: 'context>(
     context: &mut Context<'context>,
-    io_map: &'io_map mut [AtomicU8],
+    io_map: &'io_map [AtomicU8],
     group: u8,
 ) -> Result<usize, ConfigError> {
     let mut m_logical_address;
